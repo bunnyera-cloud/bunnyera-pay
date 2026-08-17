@@ -1,0 +1,8 @@
+.env
+data/*.json
+!data/.gitkeep
+*.pem
+*.key
+*.crt
+secrets/
+node_modules/

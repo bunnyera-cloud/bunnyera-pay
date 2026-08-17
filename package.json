@@ -1,0 +1,12 @@
+{
+  "name": "bunnyera-pay",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "setup": "node scripts/setup.js",
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "engines": { "node": ">=20" }
+}
