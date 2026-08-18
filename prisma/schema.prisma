@@ -1,0 +1,652 @@
+// BunnyEra Pay - Prisma Schema
+// 多商户支付管理 SaaS 平台数据库模型
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== 枚举类型 ====================
+
+enum MerchantStatus {
+  DRAFT             // 草稿
+  SUBMITTED         // 已提交
+  REVIEWING         // 审核中
+  SUPPLEMENTARY     // 补充资料
+  APPROVED          // 已通过
+  CHANNEL_PROVISION // 通道开通中
+  ACTIVE            // 正常运营
+  SUSPENDED         // 暂停
+  REJECTED          // 已拒绝
+  TERMINATED        // 已终止
+}
+
+enum OrderStatus {
+  CREATED           // 已创建
+  PAYING            // 支付中
+  PAID              // 已支付
+  CLOSED            // 已关闭
+  PARTIALLY_REFUNDED // 部分退款
+  REFUNDED          // 已全额退款
+  DISPUTED          // 争议
+  FAILED            // 失败
+}
+
+enum RefundStatus {
+  PENDING           // 待审核
+  APPROVED          // 已批准
+  PROCESSING        // 处理中
+  SUCCESS           // 成功
+  FAILED            // 失败
+  REJECTED          // 已拒绝
+}
+
+enum PaymentChannel {
+  ALIPAY_BAR        // 支付宝当面付
+  ALIPAY_PC         // 支付宝电脑网站
+  ALIPAY_WAP        // 支付宝手机网站
+  WECHAT_NATIVE     // 微信 Native
+  WECHAT_H5         // 微信 H5
+  WECHAT_JSAPI      // 微信 JSAPI
+  WECHAT_MINI       // 微信小程序
+  UNIONPAY_GATEWAY  // 银联在线网关
+  UNIONPAY_WAP      // 银联 WAP
+  UNIONPAY_QR       // 云闪付二维码
+  LAKALA_AGGREGATE  // 拉卡拉聚合
+  DIGITAL_RMB       // 数字人民币
+  VISA              // Visa
+  MASTERCARD        // Mastercard
+  ANTOM             // Antom 跨境
+  PAYPAL            // PayPal
+}
+
+enum PaymentScene {
+  QR_CODE           // 扫码
+  CASHIER           // 收银台
+  ONLINE            // 在线支付
+  H5               // H5 页面
+  MINI_PROGRAM      // 小程序
+  APP               // APP
+}
+
+enum ReconciliationStatus {
+  PENDING           // 待对账
+  MATCHED           // 已匹配
+  MISMATCH_AMOUNT   // 金额不一致
+  MISSING_IN_CHANNEL // 渠道缺失
+  MISSING_IN_SYSTEM // 系统缺失
+  DUPLICATE         // 重复
+  REFUND_MISMATCH   // 退款不一致
+}
+
+enum SettlementStatus {
+  PENDING           // 待结算
+  SETTLING          // 结算中
+  SETTLED           // 已结算
+  ARRIVED           // 已到账
+}
+
+enum UserRole {
+  PLATFORM_SUPER_ADMIN  // 平台超级管理员
+  PLATFORM_REVIEWER     // 平台审核员
+  MERCHANT_OWNER        // 商户法人
+  MERCHANT_ADMIN        // 商户管理员
+  FINANCE               // 财务
+  STORE_MANAGER         // 店长
+  CASHIER               // 收银员
+  CUSTOMER_SERVICE      // 客服
+  AUDITOR               // 审计员
+}
+
+enum QRCodeType {
+  FIXED             // 固定入口码
+  DYNAMIC           // 动态订单码
+}
+
+// ==================== 平台用户 ====================
+
+model PlatformUser {
+  id            String   @id @default(uuid())
+  email         String   @unique
+  passwordHash  String
+  name          String
+  phone         String?
+  role          UserRole @default(PLATFORM_SUPER_ADMIN)
+  isActive      Boolean  @default(true)
+  mfaEnabled    Boolean  @default(false)
+  mfaSecret     String?
+  lastLoginAt   DateTime?
+  lastLoginIp   String?
+  loginAttempts Int      @default(0)
+  lockedUntil   DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  sessions      PlatformSession[]
+  auditLogs     AuditLog[]
+
+  @@map("platform_users")
+}
+
+model PlatformSession {
+  id        String   @id @default(uuid())
+  userId    String
+  token     String   @unique
+  device    String?
+  ip        String?
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user PlatformUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("platform_sessions")
+}
+
+// ==================== 商户 ====================
+
+model Merchant {
+  id                  String         @id @default(uuid())
+  merchantNo          String         @unique // 商户编号 MEP + 时间戳
+  country             String         @default("CN")
+  companyName         String         // 企业全称
+  registrationNo      String         // 统一社会信用代码
+  legalPerson         String         // 法人姓名
+  legalPersonIdNo     String?        // 法人证件号（加密存储）
+  email               String         @unique
+  phoneCode           String         @default("+86")
+  phone               String
+  registeredAddress   String         // 注册地址
+  businessAddress     String?        // 经营地址
+  businessCategory    String         // 经营类别
+  website             String?
+  
+  // 证照（OSS 路径，不存二进制）
+  licenseImageUrl     String?        // 营业执照
+  storeFrontUrl       String?        // 门头照片
+  storeInteriorUrl    String?        // 室内经营照片
+  legalPersonIdFront  String?        // 法人证件正面
+  legalPersonIdBack   String?        // 法人证件反面
+
+  // 结算信息
+  settlementBank      String?        // 结算银行
+  settlementAccount   String?        // 结算账号（加密）
+  settlementAccountTail String?      // 结算账号尾号
+
+  // 最终受益人
+  uboName             String?        // Ultimate Beneficial Owner
+  uboIdNo             String?
+  uboRelation         String?
+
+  // 实际控制人
+  controllerName      String?
+  controllerIdNo      String?
+
+  status              MerchantStatus @default(DRAFT)
+  rejectReason        String?
+  approvedAt          DateTime?
+  agreementAccepted   Boolean        @default(false)
+  agreementVersion    String?
+
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  // 关联
+  members             MerchantMember[]
+  brands              Brand[]
+  paymentConfigs      PaymentConfig[]
+  orders              Order[]
+  refunds             Refund[]
+  settlements         Settlement[]
+  reconciliations     Reconciliation[]
+  qrCodes             QRCode[]
+  channels            MerchantChannel[]
+  apiApps             ApiApp[]
+
+  @@map("merchants")
+}
+
+// ==================== 商户成员 ====================
+
+model MerchantMember {
+  id          String   @id @default(uuid())
+  merchantId  String
+  email       String
+  name        String
+  phone       String?
+  passwordHash String
+  role        UserRole
+  isActive    Boolean  @default(true)
+  avatarUrl   String?
+  lastLoginAt DateTime?
+  loginAttempts Int    @default(0)
+  lockedUntil DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  merchant    Merchant  @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  sessions    MerchantSession[]
+  orders      Order[]   @relation("OrderOperator")
+  auditLogs   AuditLog[] @relation("MerchantMemberAudit")
+
+  @@unique([merchantId, email])
+  @@map("merchant_members")
+}
+
+model MerchantSession {
+  id        String   @id @default(uuid())
+  memberId  String
+  token     String   @unique
+  device    String?
+  ip        String?
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  member MerchantMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@map("merchant_sessions")
+}
+
+// ==================== 品牌与门店 ====================
+
+model Brand {
+  id         String   @id @default(uuid())
+  merchantId String
+  name       String
+  code       String
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  merchant   Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  stores     Store[]
+
+  @@unique([merchantId, code])
+  @@map("brands")
+}
+
+model Store {
+  id         String   @id @default(uuid())
+  brandId    String
+  name       String
+  code       String
+  address    String?
+  phone      String?
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  brand      Brand    @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  departments Department[]
+
+  @@unique([brandId, code])
+  @@map("stores")
+}
+
+model Department {
+  id         String   @id @default(uuid())
+  storeId    String
+  name       String
+  code       String
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  store      Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  counters   Counter[]
+
+  @@unique([storeId, code])
+  @@map("departments")
+}
+
+model Counter {
+  id            String   @id @default(uuid())
+  departmentId  String
+  name          String
+  code          String
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  department    Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  orders        Order[]
+
+  @@unique([departmentId, code])
+  @@map("counters")
+}
+
+// ==================== 支付渠道配置 ====================
+
+model PaymentConfig {
+  id            String        @id @default(uuid())
+  merchantId    String
+  channel       PaymentChannel
+  // 支付宝
+  appId         String?
+  privateKey    String?       // 加密存储
+  publicKey     String?       // 加密存储
+  gateway       String?
+  // 微信支付
+  mchId         String?
+  apiKey        String?       // 加密存储
+  certPath      String?
+  keyPath       String?
+  serialNo      String?
+  // 银联
+  unionpayMchId String?
+  unionpayCert  String?
+  // 通用
+  notifyUrl     String?
+  extraConfig   Json?
+  isActive      Boolean       @default(false)
+  isSandbox     Boolean       @default(true)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  merchant      Merchant      @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  @@unique([merchantId, channel])
+  @@map("payment_configs")
+}
+
+// 商户可用通道（平台授权）
+model MerchantChannel {
+  id         String         @id @default(uuid())
+  merchantId String
+  channel    PaymentChannel
+  isEnabled  Boolean        @default(false)
+  dailyLimit Decimal?       @db.Decimal(15, 2)
+  singleLimit Decimal?      @db.Decimal(15, 2)
+  feeRate    Decimal?       @db.Decimal(8, 6)
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+
+  merchant   Merchant       @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  @@unique([merchantId, channel])
+  @@map("merchant_channels")
+}
+
+// ==================== 订单 ====================
+
+model Order {
+  id                String        @id @default(uuid())
+  orderNo           String        @unique // 平台订单号
+  merchantId        String
+  brandId           String?
+  storeId           String?
+  departmentId      String?
+  counterId         String?
+  operatorId        String?       // 操作员
+  
+  subject           String        // 商品/服务描述
+  amount            Decimal       @db.Decimal(15, 2)
+  refundAmount      Decimal       @default(0) @db.Decimal(15, 2)
+  currency          String        @default("CNY")
+  
+  channel           PaymentChannel
+  scene             PaymentScene
+  channelTradeNo    String?       // 支付机构交易号
+
+  // 支付渠道返回的动态支付内容（当面付二维码内容 / 网页支付跳转 URL）
+  payData           String?       @db.Text
+  // 该订单创建时所处的支付环境：PRODUCTION / SANDBOX / PREVIEW
+  paymentEnv        String?       @default("PREVIEW")
+
+  status            OrderStatus   @default(CREATED)
+  
+  qrcodeId          String?
+  
+  paidAt            DateTime?
+  expiredAt         DateTime?
+  closedAt          DateTime?
+  
+  // 回调原始数据
+  callbackRaw       Json?
+  callbackCount     Int           @default(0)
+  
+  // 对账
+  reconciliationStatus ReconciliationStatus @default(PENDING)
+  reconciledAt      DateTime?
+  
+  // 结算
+  settlementStatus  SettlementStatus @default(PENDING)
+  settlementId      String?
+  
+  // 发票
+  invoiceRequested  Boolean       @default(false)
+  invoiceIssued     Boolean       @default(false)
+  
+  clientIp          String?
+  userAgent         String?
+  
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  merchant          Merchant      @relation(fields: [merchantId], references: [id])
+  counter           Counter?      @relation(fields: [counterId], references: [id])
+  operator          MerchantMember? @relation("OrderOperator", fields: [operatorId], references: [id])
+  qrcode            QRCode?       @relation(fields: [qrcodeId], references: [id])
+  refunds           Refund[]
+  callbackLogs      CallbackLog[]
+  payments          PaymentRecord[]
+
+  @@index([merchantId, createdAt])
+  @@index([merchantId, status])
+  @@index([channelTradeNo])
+  @@map("orders")
+}
+
+model PaymentRecord {
+  id            String   @id @default(uuid())
+  orderId       String
+  amount        Decimal  @db.Decimal(15, 2)
+  channel       PaymentChannel
+  channelTradeNo String?
+  status        String   // SUCCESS, FAILED, PENDING
+  rawData       Json?
+  createdAt     DateTime @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@map("payment_records")
+}
+
+// ==================== 回调日志 ====================
+
+model CallbackLog {
+  id         String   @id @default(uuid())
+  orderId    String
+  channel    PaymentChannel
+  rawData    Json
+  signature  String?
+  verified   Boolean  @default(false)
+  processed  Boolean  @default(false)
+  error      String?
+  createdAt  DateTime @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@map("callback_logs")
+}
+
+// ==================== 退款 ====================
+
+model Refund {
+  id              String       @id @default(uuid())
+  refundNo        String       @unique
+  orderId         String
+  merchantId      String
+  amount          Decimal      @db.Decimal(15, 2)
+  reason          String?
+  status          RefundStatus @default(PENDING)
+  channelRefundNo String?      // 支付机构退款编号
+  
+  requestedBy     String?      // 申请人
+  approvedBy      String?      // 审核人
+  approvedAt      DateTime?
+  processedAt     DateTime?
+  
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  order           Order    @relation(fields: [orderId], references: [id])
+  merchant        Merchant @relation(fields: [merchantId], references: [id])
+
+  @@map("refunds")
+}
+
+// ==================== 二维码 ====================
+
+model QRCode {
+  id          String     @id @default(uuid())
+  merchantId  String
+  code        String     @unique // 二维码编号
+  type        QRCodeType
+  name        String?    // 名称/描述
+  
+  storeId     String?
+  departmentId String?
+  counterId   String?
+  operatorId  String?
+  
+  // 动态码专用
+  amount      Decimal?   @db.Decimal(15, 2)
+  orderId     String?
+  expiredAt   DateTime?
+  
+  isActive    Boolean    @default(true)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  merchant    Merchant   @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  orders      Order[]
+
+  @@map("qr_codes")
+}
+
+// ==================== 对账 ====================
+
+model Reconciliation {
+  id              String               @id @default(uuid())
+  merchantId      String
+  channel         PaymentChannel
+  batchDate       DateTime             // 对账日期
+  
+  systemAmount    Decimal              @db.Decimal(15, 2)
+  channelAmount   Decimal              @db.Decimal(15, 2)
+  systemCount     Int
+  channelCount    Int
+  
+  status          ReconciliationStatus
+  diffAmount      Decimal?             @db.Decimal(15, 2)
+  diffCount       Int?
+  details         Json?                // 差异明细
+  
+  processedAt     DateTime?
+  processedBy     String?
+  
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  merchant        Merchant             @relation(fields: [merchantId], references: [id])
+
+  @@unique([merchantId, channel, batchDate])
+  @@map("reconciliations")
+}
+
+// ==================== 结算 ====================
+
+model Settlement {
+  id              String           @id @default(uuid())
+  merchantId      String
+  batchNo         String           @unique
+  channel         PaymentChannel?
+  
+  totalAmount     Decimal          @db.Decimal(15, 2)
+  feeAmount       Decimal          @db.Decimal(15, 2)
+  refundAmount    Decimal          @db.Decimal(15, 2)
+  adjustAmount    Decimal          @default(0) @db.Decimal(15, 2)
+  netAmount       Decimal          @db.Decimal(15, 2)
+  
+  settlementAccountTail String?
+  expectedDate    DateTime?
+  actualDate      DateTime?
+  
+  status          SettlementStatus @default(PENDING)
+  
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  merchant        Merchant         @relation(fields: [merchantId], references: [id])
+
+  @@map("settlements")
+}
+
+// ==================== API 应用 ====================
+
+model ApiApp {
+  id         String   @id @default(uuid())
+  merchantId String
+  name       String
+  appId      String   @unique
+  appSecret  String   // 加密存储
+  webhookUrl String?
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  @@map("api_apps")
+}
+
+// ==================== 审计日志 ====================
+
+model AuditLog {
+  id          String    @id @default(uuid())
+  
+  // 操作者（平台管理员或商户成员）
+  platformUserId String?
+  merchantMemberId String?
+  
+  action      String    // CREATE_ORDER, REFUND, LOGIN, etc.
+  resource    String    // order, merchant, refund, etc.
+  resourceId  String?
+  
+  ip          String?
+  device      String?
+  userAgent   String?
+  
+  beforeData  Json?
+  afterData   Json?
+  result      String    // SUCCESS, FAILED
+  
+  detail      String?
+  
+  createdAt   DateTime  @default(now())
+
+  platformUser   PlatformUser?   @relation(fields: [platformUserId], references: [id])
+  merchantMember MerchantMember? @relation("MerchantMemberAudit", fields: [merchantMemberId], references: [id])
+
+  @@index([action, createdAt])
+  @@index([resource, resourceId])
+  @@index([platformUserId])
+  @@index([merchantMemberId])
+  @@map("audit_logs")
+}
+
+// ==================== 系统配置 ====================
+
+model SystemConfig {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  value     Json
+  category  String?
+  updatedAt DateTime @updatedAt
+
+  @@map("system_configs")
+}
