@@ -51,6 +51,7 @@ export interface ResolvedAlipayConfig {
   privateKey: string;
   publicKey: string;
   gateway: string;
+  sellerId: string;
   env: PaymentEnv;
   /** 是否具备真实调用支付宝 API 的完整配置 */
   usable: boolean;
@@ -69,6 +70,13 @@ export function resolveAlipayConfig(paymentConfig?: PaymentConfig | null): Resol
     (paymentConfig?.gateway || process.env.ALIPAY_GATEWAY || '').trim() ||
     (env === 'PRODUCTION' ? ALIPAY_GATEWAY_PRODUCTION : ALIPAY_GATEWAY_SANDBOX);
 
+  // sellerId 优先从 extraConfig 读取，其次环境变量
+  const sellerId = (
+    (paymentConfig?.extraConfig as Record<string, string> | null)?.sellerId ||
+    process.env.ALIPAY_SELLER_ID ||
+    ''
+  ).trim();
+
   const missing: string[] = [];
   if (!appId) missing.push('ALIPAY_APP_ID');
   if (!privateKey) missing.push('ALIPAY_PRIVATE_KEY');
@@ -83,10 +91,41 @@ export function resolveAlipayConfig(paymentConfig?: PaymentConfig | null): Resol
     privateKey,
     publicKey,
     gateway,
+    sellerId,
     env,
     usable: missing.length === 0,
     missing,
   };
+}
+
+/**
+ * 将十进制金额字符串安全转换为整数"分"，不经过 Number / parseFloat 浮点运算。
+ * "10"    -> 1000
+ * "10.0"  -> 1000
+ * "10.01" -> 1001
+ * "0.01"  -> 1
+ */
+export function amountToFen(decimalStr: string): number {
+  const s = decimalStr.trim();
+  if (!s || !/^-?\d+(\.\d+)?$/.test(s)) {
+    throw new Error(`Invalid amount format: ${decimalStr}`);
+  }
+
+  const negative = s.startsWith('-');
+  const abs = negative ? s.slice(1) : s;
+
+  const dotIndex = abs.indexOf('.');
+  const intPart = dotIndex === -1 ? abs : abs.slice(0, dotIndex);
+  const fracRaw = dotIndex === -1 ? '' : abs.slice(dotIndex + 1);
+
+  const fracTrimmed = fracRaw.replace(/0+$/, '');
+  if (fracTrimmed.length > 2) {
+    throw new Error(`Amount has more than 2 decimal places: ${decimalStr}`);
+  }
+  const fracPadded = (fracTrimmed + '00').slice(0, 2);
+
+  const fen = parseInt(intPart + fracPadded, 10);
+  return negative ? -fen : fen;
 }
 
 /** PEM 规范化：支持环境变量中使用 \n 或裸 base64 */

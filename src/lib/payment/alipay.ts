@@ -13,6 +13,7 @@ import {
   CallbackData,
 } from './provider';
 import { PaymentChannel } from '@prisma/client';
+import { amountToFen } from './config';
 
 // 支付宝支付提供商（支持当面付、电脑网站、手机网站）
 export class AlipayProvider implements PaymentProvider {
@@ -63,7 +64,11 @@ export class AlipayProvider implements PaymentProvider {
   }
 
   // 构建请求参数
-  private buildParams(method: string, bizContent: Record<string, unknown>): Record<string, string> {
+  private buildParams(
+    method: string,
+    bizContent: Record<string, unknown>,
+    options?: { notifyUrl?: string; returnUrl?: string }
+  ): Record<string, string> {
     const params: Record<string, string> = {
       app_id: this.appId,
       method,
@@ -73,6 +78,8 @@ export class AlipayProvider implements PaymentProvider {
       version: '1.0',
       biz_content: JSON.stringify(bizContent),
     };
+    if (options?.notifyUrl) params.notify_url = options.notifyUrl;
+    if (options?.returnUrl) params.return_url = options.returnUrl;
     params.sign = this.sign(params);
     return params;
   }
@@ -101,28 +108,31 @@ export class AlipayProvider implements PaymentProvider {
         subject: params.subject,
       };
 
+      let notifyUrl: string | undefined;
+      let returnUrl: string | undefined;
+
       switch (this.channel) {
         case 'ALIPAY_BAR':
           method = 'alipay.trade.precreate';
-          bizContent.notify_url = params.notifyUrl;
+          notifyUrl = params.notifyUrl;
           break;
         case 'ALIPAY_PC':
           method = 'alipay.trade.page.pay';
           bizContent.product_code = 'FAST_INSTANT_TRADE_PAY';
-          bizContent.return_url = params.returnUrl;
-          bizContent.notify_url = params.notifyUrl;
+          returnUrl = params.returnUrl;
+          notifyUrl = params.notifyUrl;
           break;
         case 'ALIPAY_WAP':
           method = 'alipay.trade.wap.pay';
           bizContent.product_code = 'QUICK_WAP_WAY';
-          bizContent.return_url = params.returnUrl;
-          bizContent.notify_url = params.notifyUrl;
+          returnUrl = params.returnUrl;
+          notifyUrl = params.notifyUrl;
           break;
         default:
           throw new Error(`Unsupported channel: ${this.channel}`);
       }
 
-      const reqParams = this.buildParams(method, bizContent);
+      const reqParams = this.buildParams(method, bizContent, { notifyUrl, returnUrl });
       
       // 对于当面付，直接调用 API 获取二维码
       if (this.channel === 'ALIPAY_BAR') {
@@ -172,7 +182,7 @@ export class AlipayProvider implements PaymentProvider {
         };
         return {
           status: statusMap[response.trade_status] || 'UNKNOWN',
-          amount: parseFloat(response.total_amount),
+          amount: amountToFen(response.total_amount),
           tradeNo: response.trade_no,
         };
       }
@@ -242,6 +252,8 @@ export class AlipayProvider implements PaymentProvider {
     const params = body as Record<string, string>;
     const signature = params.sign;
     if (!signature) return false;
+    // sign_type 必须严格等于 RSA2，缺失也拒绝
+    if (params.sign_type !== 'RSA2') return false;
     return this.verify(params, signature);
   }
 
@@ -254,7 +266,7 @@ export class AlipayProvider implements PaymentProvider {
     return {
       orderNo: params.out_trade_no,
       tradeNo: params.trade_no,
-      amount: parseFloat(params.total_amount),
+      amount: amountToFen(params.total_amount),
       currency: 'CNY',
       status: statusMap[params.trade_status] || 'FAILED',
       paidAt: params.gmt_payment ? new Date(params.gmt_payment) : undefined,

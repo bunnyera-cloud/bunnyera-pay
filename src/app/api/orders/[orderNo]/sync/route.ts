@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/db';
 import { withAuth, successResponse, errorResponse } from '@/lib/api-utils';
 import { AlipayProvider } from '@/lib/payment/alipay';
-import { resolveAlipayConfig } from '@/lib/payment/config';
+import { resolveAlipayConfig, amountToFen } from '@/lib/payment/config';
 import { recordAuditLog } from '@/lib/audit';
 
 // 主动向支付宝查单补偿（不依赖回调）
@@ -47,9 +47,13 @@ export async function POST(
     });
 
     if (result.status === 'PAID' && (order.status === 'CREATED' || order.status === 'PAYING')) {
-      // 金额一致性校验后才可置为支付成功
-      if (result.amount !== undefined && Math.abs(result.amount - Number(order.amount)) > 0.01) {
-        return errorResponse('查询结果金额与订单不一致，已拒绝更新', 409);
+      // 金额一致性校验 — 使用整数分精确比较，禁止 JS 浮点
+      if (result.amount !== undefined) {
+        const orderAmountFen = amountToFen(order.amount.toString());
+        const queryAmountFen = result.amount; // queryOrder 返回整数分
+        if (orderAmountFen !== queryAmountFen) {
+          return errorResponse('查询结果金额与订单不一致，已拒绝更新', 409);
+        }
       }
       await prisma.$transaction(async (tx) => {
         const current = await tx.order.findUnique({ where: { id: order.id }, select: { status: true } });
