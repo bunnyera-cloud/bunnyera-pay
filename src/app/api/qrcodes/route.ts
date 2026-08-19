@@ -60,8 +60,8 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    // 生成二维码图片 URL（指向收银台页面）
-    const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
+    // 生成二维码图片URL（指向收银台页面，与 .env 的 NEXT_PUBLIC_APP_URL 保持一致）
+    const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
     const payUrl = `${baseUrl}/pay/${code}`;
 
     return successResponse({
@@ -102,7 +102,7 @@ export async function GET(request: NextRequest) {
       stores.forEach(s => storeMap.set(s.id, { name: s.name, brand: { name: s.brand.name } }));
     }
 
-    const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
+    const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
 
     return successResponse(
       qrCodes.map(qr => ({

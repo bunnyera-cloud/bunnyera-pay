@@ -3,6 +3,9 @@
 
 FROM node:20-alpine AS base
 
+# Prisma 引擎在 Alpine 上依赖 OpenSSL 系统库
+RUN apk add --no-cache openssl
+
 # ---- 依赖安装阶段 ----
 FROM base AS deps
 WORKDIR /app
