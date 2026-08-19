@@ -2,7 +2,13 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import MerchantShell from '@/components/bunnyera-pay/MerchantShell';
+import StatCard from '@/components/bunnyera-pay/StatCard';
+import Card, { CardHeader } from '@/components/bunnyera-pay/Card';
+import Badge from '@/components/bunnyera-pay/Badge';
+import EmptyState from '@/components/bunnyera-pay/EmptyState';
+import Table, { Th, Td, TableHeadRow, TableBody } from '@/components/bunnyera-pay/Table';
+import { WalletIcon, CashierIcon, OrdersIcon, ChannelIcon, StoreIcon } from '@/components/bunnyera-pay/icons';
 
 interface StoreStat {
   storeId: string;
@@ -34,17 +40,17 @@ interface DashboardData {
   storeStats: StoreStat[];
 }
 
+const formatAmount = (n: number) => `¥${Number(n).toFixed(2)}`;
+
+const QUICK_ACTIONS = [
+  { href: '/dashboard/collect', label: '创建收款', desc: '生成一笔待支付订单', Icon: WalletIcon },
+  { href: '/cashier', label: '打开收银台', desc: '面向顾客的收款页面', Icon: CashierIcon },
+  { href: '/dashboard/orders', label: '订单管理', desc: '按分店查看与筛选订单', Icon: OrdersIcon },
+  { href: '/dashboard/channels', label: '渠道配置', desc: '查看已开通支付渠道', Icon: ChannelIcon },
+];
+
 export default function DashboardPage() {
-  const router = useRouter();
   const [data, setData] = useState<DashboardData | null>(null);
-  const [user] = useState<Record<string, string> | null>(() => {
-    if (typeof window !== 'undefined') {
-      const userStr = localStorage.getItem('bep_merchant_user');
-      return userStr ? JSON.parse(userStr) : null;
-    }
-    return null;
-  });
-  const [sidebarOpen, setSidebarOpen] = useState(true);
 
   const fetchDashboard = async (token: string) => {
     try {
@@ -64,211 +70,110 @@ export default function DashboardPage() {
 
   useEffect(() => {
     const token = localStorage.getItem('bep_merchant_token');
-    if (!token) { router.push('/login'); return; }
+    if (!token) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchDashboard(token);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleLogout = () => {
-    localStorage.removeItem('bep_merchant_token');
-    localStorage.removeItem('bep_merchant_user');
-    router.push('/login');
-  };
-
-  const formatAmount = (n: number) => `¥${Number(n).toFixed(2)}`;
-
-  const navItems = [
-    { href: '/dashboard', label: '工作台', icon: '' },
-    { href: '/dashboard/collect', label: '创建收款', icon: '' },
-    { href: '/dashboard/orders', label: '订单管理', icon: '' },
-    { href: '/dashboard/refunds', label: '退款管理', icon: '↩️' },
-    { href: '/dashboard/stores', label: '门店管理', icon: '' },
-    { href: '/dashboard/qrcodes', label: '收款码', icon: '' },
-    { href: '/dashboard/channels', label: '支付渠道', icon: '' },
-    { href: '/dashboard/employees', label: '员工管理', icon: '' },
-    { href: '/dashboard/finance', label: '对账结算', icon: '' },
-    { href: '/dashboard/settings', label: '商户设置', icon: '⚙️' },
-  ];
+  const activeChannels = data ? data.channelStatus.filter(c => c.isEnabled).length : 0;
 
   return (
-    <div className="min-h-screen bg-gray-50 flex">
-      {/* 侧边栏 */}
-      <aside className={`bg-white border-r border-gray-200 flex-shrink-0 transition-all duration-200 ${sidebarOpen ? 'w-60' : 'w-16'}`}>
-        <div className="h-16 flex items-center px-4 border-b border-gray-100">
-          <Link href="/dashboard" className="flex items-center gap-2.5">
-            <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-lg flex items-center justify-center flex-shrink-0">
-              <span className="text-white font-bold text-sm">B</span>
-            </div>
-            {sidebarOpen && <span className="text-gray-900 font-bold">BunnyEra Pay</span>}
-          </Link>
+    <MerchantShell title="工作台" description="商户经营总览：全分店订单与交易汇总">
+      {!data ? (
+        <div className="flex items-center justify-center h-64">
+          <p className="text-slate-400 text-sm">加载中...</p>
         </div>
-        <nav className="p-2 space-y-0.5">
-          {navItems.map(item => (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition ${
-                item.href === '/dashboard'
-                  ? 'bg-blue-50 text-blue-700 font-medium'
-                  : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
-              }`}
-            >
-              <span className="text-base">{item.icon}</span>
-              {sidebarOpen && <span>{item.label}</span>}
-            </Link>
-          ))}
-        </nav>
-        <div className="absolute bottom-4 left-2 right-2 space-y-1">
-          <Link href="/dashboard/collect" className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm transition">
-            <span className="text-base">＋</span>
-            {sidebarOpen && <span className="font-medium">创建收款码</span>}
-          </Link>
-          <Link href="/cashier" className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-blue-600 hover:bg-blue-50 text-sm transition">
-            <span className="text-base">️</span>
-            {sidebarOpen && <span className="font-medium">打开收银台</span>}
-          </Link>
-          <button onClick={handleLogout} className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-gray-400 hover:bg-gray-50 hover:text-gray-600 text-sm transition">
-            <span className="text-base">🚪</span>
-            {sidebarOpen && <span>退出登录</span>}
-          </button>
-        </div>
-      </aside>
-
-      {/* 主内容 */}
-      <main className="flex-1 overflow-auto">
-        <header className="h-16 bg-white border-b border-gray-200 px-6 flex items-center justify-between flex-shrink-0">
-          <div className="flex items-center gap-4">
-            <button onClick={() => setSidebarOpen(!sidebarOpen)} className="text-gray-400 hover:text-gray-600 text-lg">
-              ☰
-            </button>
-            <h1 className="text-gray-900 font-semibold text-lg">工作台</h1>
+      ) : (
+        <div className="space-y-6">
+          {/* 核心指标 */}
+          <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
+            <StatCard label="总订单数" value={data.totalOrders} icon={<OrdersIcon className="w-5 h-5" />} />
+            <StatCard label="今日订单" value={data.today.orderCount} />
+            <StatCard label="总交易金额" value={formatAmount(Number(data.totalPaidAmount))} />
+            <StatCard label="今日交易金额" value={formatAmount(Number(data.today.transactionAmount))} />
+            <StatCard
+              label="分店数量"
+              value={`${data.storeCount} / ${data.maxStores}`}
+              hint={`每个商户主体最多 ${data.maxStores} 个分店`}
+              icon={<StoreIcon className="w-5 h-5" />}
+            />
+            <StatCard
+              label="活跃支付渠道"
+              value={activeChannels}
+              hint={activeChannels > 0 ? '渠道已开通并可用' : '尚未开通渠道'}
+              icon={<ChannelIcon className="w-5 h-5" />}
+            />
           </div>
-          <div className="flex items-center gap-3">
-            <div className="text-right">
-              <p className="text-gray-900 text-sm font-medium">{user?.name || '商户'}</p>
-              <p className="text-gray-400 text-xs">{user?.merchantName || user?.merchantNo}</p>
+
+          {/* 分店汇总（按累计交易金额排名，无数据显示 0）*/}
+          <Card>
+            <CardHeader
+              title="分店汇总"
+              action={<Link href="/dashboard/orders" className="text-blue-600 text-sm hover:text-blue-700">查看全部订单 →</Link>}
+            />
+            {data.storeStats.length === 0 ? (
+              <EmptyState
+                icon={<StoreIcon className="w-6 h-6" />}
+                title="尚未创建分店"
+                description="请先前往门店管理创建分店，再为分店生成收款码"
+                action={<Link href="/dashboard/stores" className="inline-flex px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 transition">去创建分店</Link>}
+              />
+            ) : (
+              <Table>
+                <TableHeadRow>
+                  <Th>排名</Th>
+                  <Th>分店</Th>
+                  <Th>状态</Th>
+                  <Th align="right">今日订单</Th>
+                  <Th align="right">今日金额</Th>
+                  <Th align="right">累计订单</Th>
+                  <Th align="right">累计金额</Th>
+                </TableHeadRow>
+                <TableBody>
+                  {[...data.storeStats]
+                    .sort((a, b) => b.totalAmount - a.totalAmount)
+                    .map((s, i) => (
+                      <tr key={s.storeId} className="hover:bg-slate-50/60 transition">
+                        <Td className="text-slate-400">{i + 1}</Td>
+                        <Td>
+                          <span className="text-slate-900 font-medium">{s.storeName}</span>
+                          <span className="text-slate-400 text-xs ml-2">{s.brandName}</span>
+                        </Td>
+                        <Td>{s.isActive ? <Badge tone="success">营业中</Badge> : <Badge tone="muted">已停用</Badge>}</Td>
+                        <Td align="right">{s.todayOrders}</Td>
+                        <Td align="right">{formatAmount(s.todayAmount)}</Td>
+                        <Td align="right">{s.totalOrders}</Td>
+                        <Td align="right" className="text-slate-900 font-semibold">{formatAmount(s.totalAmount)}</Td>
+                      </tr>
+                    ))}
+                </TableBody>
+              </Table>
+            )}
+          </Card>
+
+          {/* 快速操作（统一 SVG 图标，不使用 emoji）*/}
+          <Card>
+            <CardHeader title="快速操作" />
+            <div className="p-5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              {QUICK_ACTIONS.map(({ href, label, desc, Icon }) => (
+                <Link
+                  key={href}
+                  href={href}
+                  className="flex items-start gap-3 p-4 border border-slate-200 rounded-xl hover:border-blue-300 hover:bg-blue-50/40 transition"
+                >
+                  <span className="w-10 h-10 bg-blue-50 text-blue-600 rounded-lg flex items-center justify-center flex-shrink-0">
+                    <Icon className="w-5 h-5" />
+                  </span>
+                  <span>
+                    <span className="block text-slate-900 font-medium text-sm">{label}</span>
+                    <span className="block text-slate-500 text-xs mt-0.5">{desc}</span>
+                  </span>
+                </Link>
+              ))}
             </div>
-          </div>
-        </header>
-
-        <div className="p-6">
-          {data ? (
-            <>
-              {/* 统计卡片（总店汇总：全分店合计）*/}
-              <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-                <div className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm">
-                  <p className="text-gray-500 text-sm mb-1">总订单数</p>
-                  <p className="text-gray-900 text-2xl font-bold">{data.totalOrders}</p>
-                </div>
-                <div className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm">
-                  <p className="text-gray-500 text-sm mb-1">今日订单数</p>
-                  <p className="text-gray-900 text-2xl font-bold">{data.today.orderCount}</p>
-                </div>
-                <div className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm">
-                  <p className="text-gray-500 text-sm mb-1">总交易金额</p>
-                  <p className="text-gray-900 text-2xl font-bold">{formatAmount(Number(data.totalPaidAmount))}</p>
-                </div>
-                <div className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm">
-                  <p className="text-gray-500 text-sm mb-1">今日交易金额</p>
-                  <p className="text-gray-900 text-2xl font-bold">{formatAmount(Number(data.today.transactionAmount))}</p>
-                </div>
-              </div>
-
-              {/* 其他统计 */}
-              <div className="grid lg:grid-cols-2 gap-4 mb-6">
-                <div className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm">
-                  <h3 className="text-gray-900 font-semibold mb-4">分店数量</h3>
-                  <div className="flex items-center justify-center">
-                    <div className="text-4xl font-bold text-indigo-600">{data.storeCount} / {data.maxStores}</div>
-                  </div>
-                  <p className="text-gray-400 text-xs text-center mt-2">每个商户主体最多 {data.maxStores} 个分店</p>
-                </div>
-
-                <div className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm">
-                  <h3 className="text-gray-900 font-semibold mb-4">活跃支付渠道</h3>
-                  <div className="flex items-center justify-center">
-                    <div className="text-4xl font-bold text-blue-600">{data.channelStatus.filter(c => c.isEnabled).length}</div>
-                  </div>
-                </div>
-              </div>
-
-              {/* 分店汇总（按累计交易金额排名，无数据显示 0）*/}
-              <div className="bg-white rounded-xl border border-gray-100 shadow-sm mb-6">
-                <div className="flex items-center justify-between p-5 border-b border-gray-100">
-                  <h3 className="text-gray-900 font-semibold">分店汇总</h3>
-                  <Link href="/dashboard/orders" className="text-blue-600 text-sm hover:underline">查看全部订单 →</Link>
-                </div>
-                {data.storeStats.length === 0 ? (
-                  <div className="p-8 text-center text-gray-400 text-sm">尚未创建分店，请先前往门店管理创建</div>
-                ) : (
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
-                      <thead className="bg-gray-50 border-b border-gray-100">
-                        <tr>
-                          <th className="text-left px-5 py-3 text-gray-500 font-medium">排名</th>
-                          <th className="text-left px-5 py-3 text-gray-500 font-medium">分店</th>
-                          <th className="text-left px-5 py-3 text-gray-500 font-medium">今日订单</th>
-                          <th className="text-left px-5 py-3 text-gray-500 font-medium">今日金额</th>
-                          <th className="text-left px-5 py-3 text-gray-500 font-medium">累计订单</th>
-                          <th className="text-left px-5 py-3 text-gray-500 font-medium">累计金额</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-50">
-                        {[...data.storeStats]
-                          .sort((a, b) => b.totalAmount - a.totalAmount)
-                          .map((s, i) => (
-                            <tr key={s.storeId} className="hover:bg-gray-50/50 transition">
-                              <td className="px-5 py-3 text-gray-400">{i + 1}</td>
-                              <td className="px-5 py-3">
-                                <span className="text-gray-900 font-medium">{s.storeName}</span>
-                                <span className="text-gray-400 text-xs ml-2">{s.brandName}</span>
-                                {!s.isActive && <span className="ml-2 text-xs text-red-500">已停用</span>}
-                              </td>
-                              <td className="px-5 py-3 text-gray-700">{s.todayOrders}</td>
-                              <td className="px-5 py-3 text-gray-700">{formatAmount(s.todayAmount)}</td>
-                              <td className="px-5 py-3 text-gray-700">{s.totalOrders}</td>
-                              <td className="px-5 py-3 text-gray-900 font-medium">{formatAmount(s.totalAmount)}</td>
-                            </tr>
-                          ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </div>
-
-              {/* 快速操作 */}
-              <div className="bg-white rounded-xl border border-gray-100 shadow-sm">
-                <div className="flex items-center justify-between p-5 border-b border-gray-100">
-                  <h3 className="text-gray-900 font-semibold">快速操作</h3>
-                </div>
-                <div className="p-5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                  <Link href="/dashboard/collect" className="flex flex-col items-center p-4 bg-blue-50 rounded-lg hover:bg-blue-100 transition">
-                    <span className="text-2xl mb-2">💰</span>
-                    <span className="text-blue-700 font-medium">创建收款</span>
-                  </Link>
-                  <Link href="/cashier" className="flex flex-col items-center p-4 bg-green-50 rounded-lg hover:bg-green-100 transition">
-                    <span className="text-2xl mb-2">🧾</span>
-                    <span className="text-green-700 font-medium">打开收银台</span>
-                  </Link>
-                  <Link href="/dashboard/orders" className="flex flex-col items-center p-4 bg-purple-50 rounded-lg hover:bg-purple-100 transition">
-                    <span className="text-2xl mb-2">📋</span>
-                    <span className="text-purple-700 font-medium">订单管理</span>
-                  </Link>
-                  <Link href="/dashboard/channels" className="flex flex-col items-center p-4 bg-orange-50 rounded-lg hover:bg-orange-100 transition">
-                    <span className="text-2xl mb-2">🔧</span>
-                    <span className="text-orange-700 font-medium">渠道配置</span>
-                  </Link>
-                </div>
-              </div>
-            </>
-          ) : (
-            <div className="flex items-center justify-center h-64">
-              <div className="text-gray-400">加载中...</div>
-            </div>
-          )}
+          </Card>
         </div>
-      </main>
-    </div>
+      )}
+    </MerchantShell>
   );
 }

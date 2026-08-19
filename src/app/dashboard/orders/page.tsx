@@ -1,8 +1,15 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
-import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import MerchantShell from '@/components/bunnyera-pay/MerchantShell';
+import Card from '@/components/bunnyera-pay/Card';
+import Badge from '@/components/bunnyera-pay/Badge';
+import Button from '@/components/bunnyera-pay/Button';
+import Select from '@/components/bunnyera-pay/Select';
+import EmptyState from '@/components/bunnyera-pay/EmptyState';
+import Table, { Th, Td, TableHeadRow, TableBody } from '@/components/bunnyera-pay/Table';
+import { SearchIcon, OrdersIcon, ChevronLeftIcon, ChevronRightIcon } from '@/components/bunnyera-pay/icons';
 
 interface StoreOption {
   id: string;
@@ -38,11 +45,9 @@ const STATUS_NAMES: Record<string, string> = {
   PARTIALLY_REFUNDED: '部分退款', REFUNDED: '已退款', DISPUTED: '争议', FAILED: '失败',
 };
 
-const STATUS_COLORS: Record<string, string> = {
-  CREATED: 'bg-yellow-50 text-yellow-700', PAYING: 'bg-blue-50 text-blue-700',
-  PAID: 'bg-green-50 text-green-700', CLOSED: 'bg-gray-100 text-gray-500',
-  PARTIALLY_REFUNDED: 'bg-purple-50 text-purple-700', REFUNDED: 'bg-purple-50 text-purple-700',
-  DISPUTED: 'bg-orange-50 text-orange-700', FAILED: 'bg-red-50 text-red-700',
+const STATUS_TONE: Record<string, 'warning' | 'info' | 'success' | 'muted' | 'purple' | 'danger'> = {
+  CREATED: 'warning', PAYING: 'info', PAID: 'success', CLOSED: 'muted',
+  PARTIALLY_REFUNDED: 'purple', REFUNDED: 'purple', DISPUTED: 'warning', FAILED: 'danger',
 };
 
 export default function MerchantOrdersPage() {
@@ -57,7 +62,6 @@ export default function MerchantOrdersPage() {
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(0);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
 
   // 加载分店列表（用于筛选）
   const fetchStores = useCallback(async (t: string) => {
@@ -107,185 +111,111 @@ export default function MerchantOrdersPage() {
     if (token) fetchOrders(token);
   }, [token, fetchOrders]);
 
-  const handleLogout = () => {
-    localStorage.removeItem('bep_merchant_token');
-    localStorage.removeItem('bep_merchant_user');
-    router.push('/login');
-  };
-
-  const navItems = [
-    { href: '/dashboard', label: '工作台', icon: '' },
-    { href: '/dashboard/collect', label: '创建收款', icon: '' },
-    { href: '/dashboard/orders', label: '订单管理', icon: '' },
-    { href: '/dashboard/stores', label: '门店管理', icon: '' },
-    { href: '/dashboard/qrcodes', label: '收款码', icon: '' },
-  ];
-
   return (
-    <div className="min-h-screen bg-gray-50 flex">
-      {/* 侧边栏 */}
-      <aside className={`bg-white border-r border-gray-200 flex-shrink-0 transition-all duration-200 ${sidebarOpen ? 'w-60' : 'w-16'}`}>
-        <div className="h-16 flex items-center px-4 border-b border-gray-100">
-          <Link href="/dashboard" className="flex items-center gap-2.5">
-            <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-lg flex items-center justify-center flex-shrink-0">
-              <span className="text-white font-bold text-sm">B</span>
-            </div>
-            {sidebarOpen && <span className="text-gray-900 font-bold">BunnyEra Pay</span>}
-          </Link>
-        </div>
-        <nav className="p-2 space-y-0.5">
-          {navItems.map(item => (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition ${
-                item.href === '/dashboard/orders'
-                  ? 'bg-blue-50 text-blue-700 font-medium'
-                  : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
-              }`}
+    <MerchantShell title="订单管理" description="按分店、状态查看与筛选全部收款订单">
+      {/* 筛选栏 */}
+      <Card className="p-4 mb-4">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2">
+            <span className="text-slate-500 text-sm">分店：</span>
+            <Select
+              value={storeIdFilter}
+              onChange={e => { setStoreIdFilter(e.target.value); setPage(1); }}
+              className="!w-auto !py-1.5"
             >
-              {sidebarOpen && <span>{item.label}</span>}
-            </Link>
-          ))}
-        </nav>
-        <div className="absolute bottom-4 left-2 right-2">
-          <button onClick={handleLogout} className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-gray-400 hover:bg-gray-50 hover:text-gray-600 text-sm transition">
-            <span className="text-base">🚪</span>
-            {sidebarOpen && <span>退出登录</span>}
-          </button>
-        </div>
-      </aside>
-
-      {/* 主内容 */}
-      <main className="flex-1 overflow-auto">
-        <header className="h-16 bg-white border-b border-gray-200 px-6 flex items-center justify-between flex-shrink-0">
-          <div className="flex items-center gap-4">
-            <button onClick={() => setSidebarOpen(!sidebarOpen)} className="text-gray-400 hover:text-gray-600 text-lg">☰</button>
-            <h1 className="text-gray-900 font-semibold text-lg">订单管理</h1>
+              <option value="">全部分店</option>
+              {stores.map(s => (
+                <option key={s.id} value={s.id}>{s.brandName} · {s.name}</option>
+              ))}
+            </Select>
           </div>
-        </header>
+          <div className="flex items-center gap-2">
+            <span className="text-slate-500 text-sm">状态：</span>
+            <Select
+              value={statusFilter}
+              onChange={e => { setStatusFilter(e.target.value); setPage(1); }}
+              className="!w-auto !py-1.5"
+            >
+              <option value="">全部</option>
+              {Object.entries(STATUS_NAMES).map(([k, v]) => (
+                <option key={k} value={k}>{v}</option>
+              ))}
+            </Select>
+          </div>
+          <div className="relative">
+            <SearchIcon className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              type="text"
+              placeholder="搜索订单号"
+              value={orderNoSearch}
+              onChange={e => setOrderNoSearch(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') setPage(1); }}
+              className="pl-9 pr-3 py-1.5 border border-slate-200 rounded-lg text-sm text-slate-700 w-56 bg-white focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 transition"
+            />
+          </div>
+          <div className="ml-auto text-slate-400 text-sm">共 {total} 笔订单</div>
+        </div>
+      </Card>
 
-        <div className="p-6">
-          {/* 筛选栏 */}
-          <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-4 mb-4">
-            <div className="flex flex-wrap items-center gap-3">
-              <div className="flex items-center gap-2">
-                <span className="text-gray-500 text-sm">分店：</span>
-                <select
-                  value={storeIdFilter}
-                  onChange={e => { setStoreIdFilter(e.target.value); setPage(1); }}
-                  className="px-3 py-1.5 border border-gray-200 rounded-lg text-sm text-gray-700 bg-white"
-                >
-                  <option value="">全部分店</option>
-                  {stores.map(s => (
-                    <option key={s.id} value={s.id}>{s.brandName} · {s.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-gray-500 text-sm">状态：</span>
-                <select
-                  value={statusFilter}
-                  onChange={e => { setStatusFilter(e.target.value); setPage(1); }}
-                  className="px-3 py-1.5 border border-gray-200 rounded-lg text-sm text-gray-700 bg-white"
-                >
-                  <option value="">全部</option>
-                  {Object.entries(STATUS_NAMES).map(([k, v]) => (
-                    <option key={k} value={k}>{v}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="flex items-center gap-2">
-                <input
-                  type="text"
-                  placeholder="搜索订单号"
-                  value={orderNoSearch}
-                  onChange={e => setOrderNoSearch(e.target.value)}
-                  onKeyDown={e => { if (e.key === 'Enter') setPage(1); }}
-                  className="px-3 py-1.5 border border-gray-200 rounded-lg text-sm text-gray-700 w-52"
-                />
-              </div>
-              <div className="ml-auto text-gray-400 text-sm">共 {total} 笔订单</div>
+      {/* 订单列表 */}
+      <Card className="overflow-hidden">
+        {loading ? (
+          <div className="p-12 text-center text-slate-400 text-sm">加载中...</div>
+        ) : orders.length === 0 ? (
+          <EmptyState icon={<OrdersIcon className="w-6 h-6" />} title="暂无订单数据" description="顾客通过收款码完成支付后，订单会显示在这里" />
+        ) : (
+          <Table>
+            <TableHeadRow>
+              <Th>订单号</Th>
+              <Th>商品</Th>
+              <Th>分店</Th>
+              <Th>渠道</Th>
+              <Th align="right">金额</Th>
+              <Th>状态</Th>
+              <Th>创建时间</Th>
+            </TableHeadRow>
+            <TableBody>
+              {orders.map(o => (
+                <tr key={o.id} className="hover:bg-slate-50/60 transition">
+                  <Td className="text-slate-900 font-mono text-xs">{o.orderNo}</Td>
+                  <Td className="max-w-[180px] truncate">{o.subject}</Td>
+                  <Td>
+                    {o.storeName ? (
+                      <>
+                        <div className="text-slate-700">{o.storeName}</div>
+                        {o.brandName ? <div className="text-xs text-slate-400">{o.brandName}</div> : null}
+                      </>
+                    ) : (
+                      <span className="text-slate-400">—</span>
+                    )}
+                  </Td>
+                  <Td>{CHANNEL_NAMES[o.channel] || o.channel}</Td>
+                  <Td align="right" className="text-slate-900 font-semibold">¥{Number(o.amount).toFixed(2)}</Td>
+                  <Td><Badge tone={STATUS_TONE[o.status] || 'muted'}>{STATUS_NAMES[o.status] || o.status}</Badge></Td>
+                  <Td className="text-slate-400 text-xs">{new Date(o.createdAt).toLocaleString('zh-CN')}</Td>
+                </tr>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+
+        {/* 分页 */}
+        {totalPages > 1 ? (
+          <div className="flex items-center justify-between px-4 py-3 border-t border-slate-100">
+            <span className="text-slate-400 text-sm">第 {page} / {totalPages} 页</span>
+            <div className="flex gap-2">
+              <Button variant="secondary" size="sm" disabled={page <= 1} onClick={() => setPage(p => p - 1)}>
+                <ChevronLeftIcon className="w-4 h-4" />
+                上一页
+              </Button>
+              <Button variant="secondary" size="sm" disabled={page >= totalPages} onClick={() => setPage(p => p + 1)}>
+                下一页
+                <ChevronRightIcon className="w-4 h-4" />
+              </Button>
             </div>
           </div>
-
-          {/* 订单列表 */}
-          <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
-            {loading ? (
-              <div className="p-12 text-center text-gray-400">加载中...</div>
-            ) : orders.length === 0 ? (
-              <div className="p-12 text-center text-gray-400">暂无订单数据</div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead className="bg-gray-50 border-b border-gray-100">
-                    <tr>
-                      <th className="text-left px-4 py-3 text-gray-500 font-medium">订单号</th>
-                      <th className="text-left px-4 py-3 text-gray-500 font-medium">商品</th>
-                      <th className="text-left px-4 py-3 text-gray-500 font-medium">分店</th>
-                      <th className="text-left px-4 py-3 text-gray-500 font-medium">渠道</th>
-                      <th className="text-left px-4 py-3 text-gray-500 font-medium">金额</th>
-                      <th className="text-left px-4 py-3 text-gray-500 font-medium">状态</th>
-                      <th className="text-left px-4 py-3 text-gray-500 font-medium">创建时间</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-50">
-                    {orders.map(o => (
-                      <tr key={o.id} className="hover:bg-gray-50/50 transition">
-                        <td className="px-4 py-3 text-gray-900 font-mono text-xs">{o.orderNo}</td>
-                        <td className="px-4 py-3 text-gray-700 max-w-[180px] truncate">{o.subject}</td>
-                        <td className="px-4 py-3 text-gray-600">
-                          {o.storeName ? (
-                            <>
-                              <div>{o.storeName}</div>
-                              {o.brandName && <div className="text-xs text-gray-400">{o.brandName}</div>}
-                            </>
-                          ) : (
-                            <span className="text-gray-400">—</span>
-                          )}
-                        </td>
-                        <td className="px-4 py-3 text-gray-600">{CHANNEL_NAMES[o.channel] || o.channel}</td>
-                        <td className="px-4 py-3 text-gray-900 font-medium">¥{Number(o.amount).toFixed(2)}</td>
-                        <td className="px-4 py-3">
-                          <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_COLORS[o.status] || 'bg-gray-100 text-gray-600'}`}>
-                            {STATUS_NAMES[o.status] || o.status}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-gray-400 text-xs">
-                          {new Date(o.createdAt).toLocaleString('zh-CN')}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-
-            {/* 分页 */}
-            {totalPages > 1 && (
-              <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100">
-                <span className="text-gray-400 text-sm">第 {page} / {totalPages} 页</span>
-                <div className="flex gap-2">
-                  <button
-                    disabled={page <= 1}
-                    onClick={() => setPage(p => p - 1)}
-                    className="px-3 py-1 border border-gray-200 rounded text-sm text-gray-600 disabled:opacity-40 hover:bg-gray-50 transition"
-                  >
-                    上一页
-                  </button>
-                  <button
-                    disabled={page >= totalPages}
-                    onClick={() => setPage(p => p + 1)}
-                    className="px-3 py-1 border border-gray-200 rounded text-sm text-gray-600 disabled:opacity-40 hover:bg-gray-50 transition"
-                  >
-                    下一页
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      </main>
-    </div>
+        ) : null}
+      </Card>
+    </MerchantShell>
   );
 }
