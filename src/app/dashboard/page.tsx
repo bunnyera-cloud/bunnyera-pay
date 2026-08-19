@@ -5,25 +5,12 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
 interface DashboardData {
-  today: {
-    transactionAmount: number;
-    refundAmount: number;
-    orderCount: number;
-    pendingRefunds: number;
-    pendingReconcile: number;
-    settlingAmount: number;
-  };
-  channelBreakdown: Array<{ channel: string; amount: number; count: number }>;
-  channelStatus: Array<{ channel: string; isEnabled: boolean }>;
-  recentOrders: Array<{
-    id: string;
-    orderNo: string;
-    subject: string;
-    amount: number;
-    channel: string;
-    status: string;
-    createdAt: string;
-  }>;
+  totalOrders: number;
+  todayOrders: number;
+  totalAmount: number;
+  todayAmount: number;
+  successRate: number;
+  activeChannels: number;
 }
 
 const CHANNEL_NAMES: Record<string, string> = {
@@ -47,7 +34,7 @@ export default function DashboardPage() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [user] = useState<Record<string, string> | null>(() => {
     if (typeof window !== 'undefined') {
-      const userStr = (localStorage.getItem('bep_merchant_user') || localStorage.getItem('bep_user'));
+      const userStr = localStorage.getItem('bep_merchant_user');
       return userStr ? JSON.parse(userStr) : null;
     }
     return null;
@@ -61,7 +48,9 @@ export default function DashboardPage() {
       });
       if (res.ok) {
         const json = await res.json();
-        setData(json.data);
+        if (json.success) {
+          setData(json.data);
+        }
       }
     } catch {
       console.error('Dashboard fetch error');
@@ -69,7 +58,7 @@ export default function DashboardPage() {
   };
 
   useEffect(() => {
-    const token = (localStorage.getItem('bep_merchant_token') || localStorage.getItem('bep_token'));
+    const token = localStorage.getItem('bep_merchant_token');
     if (!token) { router.push('/login'); return; }
     // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchDashboard(token);
@@ -77,6 +66,8 @@ export default function DashboardPage() {
   }, []);
 
   const handleLogout = () => {
+    localStorage.removeItem('bep_merchant_token');
+    localStorage.removeItem('bep_merchant_user');
     localStorage.removeItem('bep_token');
     localStorage.removeItem('bep_user');
     router.push('/login');
@@ -164,145 +155,63 @@ export default function DashboardPage() {
               {/* 统计卡片 */}
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
                 <div className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm">
-                  <p className="text-gray-500 text-sm mb-1">今日交易金额</p>
-                  <p className="text-gray-900 text-2xl font-bold">{formatAmount(Number(data.today.transactionAmount))}</p>
+                  <p className="text-gray-500 text-sm mb-1">总订单数</p>
+                  <p className="text-gray-900 text-2xl font-bold">{data.totalOrders}</p>
                 </div>
                 <div className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm">
                   <p className="text-gray-500 text-sm mb-1">今日订单数</p>
-                  <p className="text-gray-900 text-2xl font-bold">{data.today.orderCount}</p>
+                  <p className="text-gray-900 text-2xl font-bold">{data.todayOrders}</p>
                 </div>
                 <div className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm">
-                  <p className="text-gray-500 text-sm mb-1">今日退款金额</p>
-                  <p className="text-red-600 text-2xl font-bold">{formatAmount(Number(data.today.refundAmount))}</p>
+                  <p className="text-gray-500 text-sm mb-1">总交易金额</p>
+                  <p className="text-gray-900 text-2xl font-bold">{formatAmount(Number(data.totalAmount))}</p>
                 </div>
                 <div className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm">
-                  <p className="text-gray-500 text-sm mb-1">结算中金额</p>
-                  <p className="text-blue-600 text-2xl font-bold">{formatAmount(Number(data.today.settlingAmount))}</p>
+                  <p className="text-gray-500 text-sm mb-1">今日交易金额</p>
+                  <p className="text-gray-900 text-2xl font-bold">{formatAmount(Number(data.todayAmount))}</p>
                 </div>
               </div>
 
-              {/* 待处理事项 + 渠道状态 */}
+              {/* 其他统计 */}
               <div className="grid lg:grid-cols-2 gap-4 mb-6">
                 <div className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm">
-                  <h3 className="text-gray-900 font-semibold mb-4">待处理事项</h3>
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between p-3 bg-red-50 rounded-lg">
-                      <div className="flex items-center gap-3">
-                        <span className="text-lg">↩️</span>
-                        <span className="text-gray-700 text-sm font-medium">待处理退款</span>
-                      </div>
-                      <span className="text-red-600 font-bold text-lg">{data.today.pendingRefunds}</span>
-                    </div>
-                    <div className="flex items-center justify-between p-3 bg-amber-50 rounded-lg">
-                      <div className="flex items-center gap-3">
-                        <span className="text-lg"></span>
-                        <span className="text-gray-700 text-sm font-medium">待对账订单</span>
-                      </div>
-                      <span className="text-amber-600 font-bold text-lg">{data.today.pendingReconcile}</span>
-                    </div>
+                  <h3 className="text-gray-900 font-semibold mb-4">支付成功率</h3>
+                  <div className="flex items-center justify-center">
+                    <div className="text-4xl font-bold text-green-600">{data.successRate}%</div>
                   </div>
                 </div>
 
                 <div className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm">
-                  <h3 className="text-gray-900 font-semibold mb-4">渠道运行状态</h3>
-                  {data.channelStatus.length > 0 ? (
-                    <div className="space-y-2">
-                      {data.channelStatus.map(ch => (
-                        <div key={ch.channel} className="flex items-center justify-between p-2.5 bg-gray-50 rounded-lg">
-                          <span className="text-gray-700 text-sm font-medium">{CHANNEL_NAMES[ch.channel] || ch.channel}</span>
-                          <span className={`text-xs px-2.5 py-1 rounded-full font-medium ${
-                            ch.isEnabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'
-                          }`}>
-                            {ch.isEnabled ? '已启用' : '未启用'}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="text-center py-6">
-                      <p className="text-gray-400 text-sm mb-2">暂未配置支付渠道</p>
-                      <Link href="/dashboard/channels" className="text-blue-600 text-sm font-medium hover:underline">
-                        前往配置 →
-                      </Link>
-                    </div>
-                  )}
+                  <h3 className="text-gray-900 font-semibold mb-4">活跃支付渠道</h3>
+                  <div className="flex items-center justify-center">
+                    <div className="text-4xl font-bold text-blue-600">{data.activeChannels}</div>
+                  </div>
                 </div>
               </div>
 
-              {/* 渠道占比 */}
-              {data.channelBreakdown.length > 0 && (
-                <div className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm mb-6">
-                  <h3 className="text-gray-900 font-semibold mb-4">今日渠道占比</h3>
-                  <div className="space-y-3">
-                    {data.channelBreakdown.map(ch => {
-                      const total = data.channelBreakdown.reduce((s, c) => s + Number(c.amount), 0);
-                      const pct = total > 0 ? ((Number(ch.amount) / total) * 100).toFixed(1) : '0';
-                      return (
-                        <div key={ch.channel} className="flex items-center gap-4">
-                          <span className="text-gray-600 text-sm w-24">{CHANNEL_NAMES[ch.channel] || ch.channel}</span>
-                          <div className="flex-1 bg-gray-100 rounded-full h-2.5">
-                            <div className="bg-blue-500 h-2.5 rounded-full transition-all" style={{ width: `${pct}%` }}></div>
-                          </div>
-                          <span className="text-gray-900 text-sm font-medium w-24 text-right">{formatAmount(Number(ch.amount))}</span>
-                          <span className="text-gray-400 text-xs w-12 text-right">{pct}%</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {/* 最近订单 */}
+              {/* 快速操作 */}
               <div className="bg-white rounded-xl border border-gray-100 shadow-sm">
                 <div className="flex items-center justify-between p-5 border-b border-gray-100">
-                  <h3 className="text-gray-900 font-semibold">最近订单</h3>
-                  <Link href="/dashboard/orders" className="text-blue-600 text-sm font-medium hover:underline">查看全部 →</Link>
+                  <h3 className="text-gray-900 font-semibold">快速操作</h3>
                 </div>
-                {data.recentOrders.length > 0 ? (
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="text-gray-400 border-b border-gray-100">
-                          <th className="text-left px-5 py-3 font-medium">订单号</th>
-                          <th className="text-left px-5 py-3 font-medium">商品</th>
-                          <th className="text-right px-5 py-3 font-medium">金额</th>
-                          <th className="text-left px-5 py-3 font-medium">渠道</th>
-                          <th className="text-left px-5 py-3 font-medium">状态</th>
-                          <th className="text-right px-5 py-3 font-medium">时间</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {data.recentOrders.map(order => (
-                          <tr key={order.id} className="border-b border-gray-50 hover:bg-gray-50/50">
-                            <td className="px-5 py-3.5 text-gray-900 font-mono text-xs">{order.orderNo}</td>
-                            <td className="px-5 py-3.5 text-gray-700">{order.subject}</td>
-                            <td className="px-5 py-3.5 text-gray-900 text-right font-semibold">{formatAmount(Number(order.amount))}</td>
-                            <td className="px-5 py-3.5 text-gray-500">{CHANNEL_NAMES[order.channel] || order.channel}</td>
-                            <td className="px-5 py-3.5">
-                              <span className={`text-xs px-2.5 py-1 rounded-full font-medium ${STATUS_COLORS[order.status] || 'bg-gray-100 text-gray-500'}`}>
-                                {STATUS_NAMES[order.status] || order.status}
-                              </span>
-                            </td>
-                            <td className="px-5 py-3.5 text-gray-400 text-right text-xs">
-                              {new Date(order.createdAt).toLocaleString('zh-CN')}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <div className="text-center py-12">
-                    <p className="text-gray-400 text-sm mb-3">暂无订单数据</p>
-                    <Link href="/dashboard/collect" className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm transition">
-            <span className="text-base">＋</span>
-            {sidebarOpen && <span className="font-medium">创建收款码</span>}
-          </Link>
-          <Link href="/cashier" className="text-blue-600 text-sm font-medium hover:underline">
-                      前往收银台创建第一笔订单 →
-                    </Link>
-                  </div>
-                )}
+                <div className="p-5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  <Link href="/dashboard/collect" className="flex flex-col items-center p-4 bg-blue-50 rounded-lg hover:bg-blue-100 transition">
+                    <span className="text-2xl mb-2">💰</span>
+                    <span className="text-blue-700 font-medium">创建收款</span>
+                  </Link>
+                  <Link href="/cashier" className="flex flex-col items-center p-4 bg-green-50 rounded-lg hover:bg-green-100 transition">
+                    <span className="text-2xl mb-2">🧾</span>
+                    <span className="text-green-700 font-medium">打开收银台</span>
+                  </Link>
+                  <Link href="/dashboard/orders" className="flex flex-col items-center p-4 bg-purple-50 rounded-lg hover:bg-purple-100 transition">
+                    <span className="text-2xl mb-2">📋</span>
+                    <span className="text-purple-700 font-medium">订单管理</span>
+                  </Link>
+                  <Link href="/dashboard/channels" className="flex flex-col items-center p-4 bg-orange-50 rounded-lg hover:bg-orange-100 transition">
+                    <span className="text-2xl mb-2">🔧</span>
+                    <span className="text-orange-700 font-medium">渠道配置</span>
+                  </Link>
+                </div>
               </div>
             </>
           ) : (

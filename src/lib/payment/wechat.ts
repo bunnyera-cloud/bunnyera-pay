@@ -232,25 +232,26 @@ export class WechatPayProvider implements PaymentProvider {
   }
 
   verifyCallback(body: unknown, headers: Record<string, string>): boolean {
-    // 微信支付 V3 回调验签
+    // 微信支付 V3 回调验签 - 安全修复：没有生产配置时fail closed
     const timestamp = headers['wechatpay-timestamp'];
     const nonce = headers['wechatpay-nonce'];
     const signature = headers['wechatpay-signature'];
     if (!timestamp || !nonce || !signature) return false;
 
-    const bodyStr = typeof body === 'string' ? body : JSON.stringify(body);
-    const message = `${timestamp}\n${nonce}\n${bodyStr}\n`;
-    
-    // 使用微信平台证书验签（实际需要从证书管理中获取）
-    try {
-      const verify = crypto.createVerify('RSA-SHA256');
-      verify.update(message);
-      // 这里需要使用微信平台公钥证书
-      // return verify.verify(wechatPayPublicKey, signature, 'base64');
-      return true; // TODO: 生产环境需要实现完整验签
-    } catch {
+    // 安全检查：如果缺少必要生产配置，直接拒绝
+    if (!this.apiKey || !this.serialNo || !this.privateKey || this.apiKey === 'TODO') {
+      console.warn('[WeChatPay] Missing production configuration for callback verification');
       return false;
     }
+
+    const bodyStr = typeof body === 'string' ? body : JSON.stringify(body);
+    const message = `${timestamp}\n${nonce}\n${bodyStr}\n`;
+
+    // 使用微信平台证书验签（实际需要从证书管理中获取）
+    // 注意：生产环境需要实现完整的证书管理和验签逻辑
+    // 当前版本在没有真实证书的情况下安全地返回false
+    console.warn('[WeChatPay] Callback verification requires WeChatPay public key certificate (not implemented)');
+    return false;
   }
 
   parseCallback(body: unknown): CallbackData {

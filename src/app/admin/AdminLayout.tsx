@@ -29,7 +29,7 @@ export default function AdminLayout({ children, title }: AdminLayoutProps) {
   const pathname = usePathname();
 
   useEffect(() => {
-    const token = localStorage.getItem('bep_token');
+    const token = localStorage.getItem('bep_platform_token') || localStorage.getItem('bep_token');
     if (!token) {
       router.push('/login');
     }
@@ -37,6 +37,8 @@ export default function AdminLayout({ children, title }: AdminLayoutProps) {
   }, []);
 
   const handleLogout = () => {
+    localStorage.removeItem('bep_platform_token');
+    localStorage.removeItem('bep_platform_user');
     localStorage.removeItem('bep_token');
     localStorage.removeItem('bep_user');
     router.push('/login');

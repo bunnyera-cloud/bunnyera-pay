@@ -6,7 +6,7 @@ import { useRouter } from 'next/navigation';
 
 export default function LoginPage() {
   const router = useRouter();
-  const [tab, setTab] = useState<'platform' | 'merchant'>('merchant');
+  const [tab, setTab] = useState<'platform' | 'merchant'>('platform');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -18,7 +18,7 @@ export default function LoginPage() {
     setLoading(true);
 
     try {
-      const endpoint = tab === 'platform' ? '/api/auth/platform/login' : '/api/auth/merchant/login';
+      const endpoint = tab === 'platform' ? '/api/auth/platform' : '/api/auth/merchant';
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -31,24 +31,13 @@ export default function LoginPage() {
         return;
       }
 
-      // 分离管理员与商户登录状态，避免两种身份互相覆盖
       if (tab === 'platform') {
-        localStorage.setItem('bep_platform_token', data.data.token);
-        localStorage.setItem('bep_platform_user', JSON.stringify(data.data.user));
-
-        // 兼容现有管理员页面
-        localStorage.setItem('bep_token', data.data.token);
-        localStorage.setItem('bep_user', JSON.stringify(data.data.user));
-
+        localStorage.setItem('bep_platform_token', data.token);
+        localStorage.setItem('bep_platform_user', JSON.stringify(data.user));
         router.push('/admin/dashboard');
       } else {
-        localStorage.setItem('bep_merchant_token', data.data.token);
-        localStorage.setItem('bep_merchant_user', JSON.stringify(data.data.user));
-
-        // 兼容现有商户页面
-        localStorage.setItem('bep_token', data.data.token);
-        localStorage.setItem('bep_user', JSON.stringify(data.data.user));
-
+        localStorage.setItem('bep_merchant_token', data.token);
+        localStorage.setItem('bep_merchant_user', JSON.stringify(data.user));
         router.push('/dashboard');
       }
     } catch {
@@ -133,14 +122,16 @@ export default function LoginPage() {
             </button>
           </form>
 
-          <div className="mt-6 text-center">
-            <p className="text-gray-400 text-sm">
-              还没有商户账号？{' '}
-              <Link href="/register" className="text-blue-400 hover:text-blue-300">
-                立即注册入驻
-              </Link>
-            </p>
-          </div>
+          {tab === 'merchant' && (
+            <div className="mt-6 text-center">
+              <p className="text-gray-400 text-sm">
+                还没有商户账号？{' '}
+                <Link href="/register" className="text-blue-400 hover:text-blue-300">
+                  立即注册入驻
+                </Link>
+              </p>
+            </div>
+          )}
         </div>
       </div>
     </div>
