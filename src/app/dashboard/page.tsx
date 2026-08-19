@@ -4,30 +4,35 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
-interface DashboardData {
+interface StoreStat {
+  storeId: string;
+  storeName: string;
+  brandName: string;
+  isActive: boolean;
   totalOrders: number;
-  todayOrders: number;
   totalAmount: number;
+  todayOrders: number;
   todayAmount: number;
-  successRate: number;
-  activeChannels: number;
 }
 
-const CHANNEL_NAMES: Record<string, string> = {
-  ALIPAY_BAR: '支付宝当面付', ALIPAY_PC: '支付宝电脑', ALIPAY_WAP: '支付宝H5',
-  WECHAT_NATIVE: '微信扫码', WECHAT_H5: '微信H5', WECHAT_JSAPI: '微信JSAPI',
-  UNIONPAY_GATEWAY: '银联网关', UNIONPAY_WAP: '银联WAP', UNIONPAY_QR: '云闪付',
-};
-
-const STATUS_NAMES: Record<string, string> = {
-  CREATED: '待支付', PAYING: '支付中', PAID: '已支付', CLOSED: '已关闭',
-  PARTIALLY_REFUNDED: '部分退款', REFUNDED: '已退款', DISPUTED: '争议', FAILED: '失败',
-};
-
-const STATUS_COLORS: Record<string, string> = {
-  CREATED: 'bg-yellow-50 text-yellow-700', PAYING: 'bg-blue-50 text-blue-700', PAID: 'bg-green-50 text-green-700',
-  CLOSED: 'bg-gray-100 text-gray-500', REFUNDED: 'bg-purple-50 text-purple-700', FAILED: 'bg-red-50 text-red-700',
-};
+interface DashboardData {
+  storeCount: number;
+  maxStores: number;
+  totalOrders: number;
+  totalPaidAmount: number;
+  today: {
+    transactionAmount: number | string;
+    refundAmount: number | string;
+    orderCount: number;
+    pendingRefunds: number;
+    pendingReconcile: number;
+    settlingAmount: number | string;
+  };
+  channelBreakdown: { channel: string; amount: number | string; count: number }[];
+  channelStatus: { channel: string; isEnabled: boolean }[];
+  recentOrders: { id: string; orderNo: string; subject: string; amount: number | string; channel: string; status: string; createdAt: string }[];
+  storeStats: StoreStat[];
+}
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -68,8 +73,6 @@ export default function DashboardPage() {
   const handleLogout = () => {
     localStorage.removeItem('bep_merchant_token');
     localStorage.removeItem('bep_merchant_user');
-    localStorage.removeItem('bep_token');
-    localStorage.removeItem('bep_user');
     router.push('/login');
   };
 
@@ -152,7 +155,7 @@ export default function DashboardPage() {
         <div className="p-6">
           {data ? (
             <>
-              {/* 统计卡片 */}
+              {/* 统计卡片（总店汇总：全分店合计）*/}
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
                 <div className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm">
                   <p className="text-gray-500 text-sm mb-1">总订单数</p>
@@ -160,33 +163,78 @@ export default function DashboardPage() {
                 </div>
                 <div className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm">
                   <p className="text-gray-500 text-sm mb-1">今日订单数</p>
-                  <p className="text-gray-900 text-2xl font-bold">{data.todayOrders}</p>
+                  <p className="text-gray-900 text-2xl font-bold">{data.today.orderCount}</p>
                 </div>
                 <div className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm">
                   <p className="text-gray-500 text-sm mb-1">总交易金额</p>
-                  <p className="text-gray-900 text-2xl font-bold">{formatAmount(Number(data.totalAmount))}</p>
+                  <p className="text-gray-900 text-2xl font-bold">{formatAmount(Number(data.totalPaidAmount))}</p>
                 </div>
                 <div className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm">
                   <p className="text-gray-500 text-sm mb-1">今日交易金额</p>
-                  <p className="text-gray-900 text-2xl font-bold">{formatAmount(Number(data.todayAmount))}</p>
+                  <p className="text-gray-900 text-2xl font-bold">{formatAmount(Number(data.today.transactionAmount))}</p>
                 </div>
               </div>
 
               {/* 其他统计 */}
               <div className="grid lg:grid-cols-2 gap-4 mb-6">
                 <div className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm">
-                  <h3 className="text-gray-900 font-semibold mb-4">支付成功率</h3>
+                  <h3 className="text-gray-900 font-semibold mb-4">分店数量</h3>
                   <div className="flex items-center justify-center">
-                    <div className="text-4xl font-bold text-green-600">{data.successRate}%</div>
+                    <div className="text-4xl font-bold text-indigo-600">{data.storeCount} / {data.maxStores}</div>
                   </div>
+                  <p className="text-gray-400 text-xs text-center mt-2">每个商户主体最多 {data.maxStores} 个分店</p>
                 </div>
 
                 <div className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm">
                   <h3 className="text-gray-900 font-semibold mb-4">活跃支付渠道</h3>
                   <div className="flex items-center justify-center">
-                    <div className="text-4xl font-bold text-blue-600">{data.activeChannels}</div>
+                    <div className="text-4xl font-bold text-blue-600">{data.channelStatus.filter(c => c.isEnabled).length}</div>
                   </div>
                 </div>
+              </div>
+
+              {/* 分店汇总（按累计交易金额排名，无数据显示 0）*/}
+              <div className="bg-white rounded-xl border border-gray-100 shadow-sm mb-6">
+                <div className="flex items-center justify-between p-5 border-b border-gray-100">
+                  <h3 className="text-gray-900 font-semibold">分店汇总</h3>
+                  <Link href="/dashboard/orders" className="text-blue-600 text-sm hover:underline">查看全部订单 →</Link>
+                </div>
+                {data.storeStats.length === 0 ? (
+                  <div className="p-8 text-center text-gray-400 text-sm">尚未创建分店，请先前往门店管理创建</div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-gray-50 border-b border-gray-100">
+                        <tr>
+                          <th className="text-left px-5 py-3 text-gray-500 font-medium">排名</th>
+                          <th className="text-left px-5 py-3 text-gray-500 font-medium">分店</th>
+                          <th className="text-left px-5 py-3 text-gray-500 font-medium">今日订单</th>
+                          <th className="text-left px-5 py-3 text-gray-500 font-medium">今日金额</th>
+                          <th className="text-left px-5 py-3 text-gray-500 font-medium">累计订单</th>
+                          <th className="text-left px-5 py-3 text-gray-500 font-medium">累计金额</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-50">
+                        {[...data.storeStats]
+                          .sort((a, b) => b.totalAmount - a.totalAmount)
+                          .map((s, i) => (
+                            <tr key={s.storeId} className="hover:bg-gray-50/50 transition">
+                              <td className="px-5 py-3 text-gray-400">{i + 1}</td>
+                              <td className="px-5 py-3">
+                                <span className="text-gray-900 font-medium">{s.storeName}</span>
+                                <span className="text-gray-400 text-xs ml-2">{s.brandName}</span>
+                                {!s.isActive && <span className="ml-2 text-xs text-red-500">已停用</span>}
+                              </td>
+                              <td className="px-5 py-3 text-gray-700">{s.todayOrders}</td>
+                              <td className="px-5 py-3 text-gray-700">{formatAmount(s.todayAmount)}</td>
+                              <td className="px-5 py-3 text-gray-700">{s.totalOrders}</td>
+                              <td className="px-5 py-3 text-gray-900 font-medium">{formatAmount(s.totalAmount)}</td>
+                            </tr>
+                          ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
 
               {/* 快速操作 */}

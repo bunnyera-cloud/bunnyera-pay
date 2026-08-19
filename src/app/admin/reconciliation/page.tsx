@@ -7,7 +7,7 @@ export default function AdminReconciliationPage() {
   const [issues, setIssues] = useState(0);
 
   useEffect(() => {
-    const token = typeof window !== 'undefined' ? localStorage.getItem('bep_token') : null;
+    const token = typeof window !== 'undefined' ? localStorage.getItem('bep_platform_token') : null;
     if (!token) return;
     fetch('/api/admin/stats', { headers: { Authorization: `Bearer ${token}` } })
       .then(r => r.json())

@@ -29,8 +29,23 @@ export default function AdminLayout({ children, title }: AdminLayoutProps) {
   const pathname = usePathname();
 
   useEffect(() => {
-    const token = localStorage.getItem('bep_platform_token') || localStorage.getItem('bep_token');
+    // 只接受平台管理员 token，不接受商户 token
+    const token = localStorage.getItem('bep_platform_token');
     if (!token) {
+      router.push('/login');
+      return;
+    }
+    // 验证 token 类型
+    try {
+      const payload = JSON.parse(atob(token.split('.')[1]));
+      if (payload.type !== 'platform') {
+        // 不是平台管理员 token，清除并跳转
+        localStorage.removeItem('bep_platform_token');
+        localStorage.removeItem('bep_platform_user');
+        router.push('/login');
+      }
+    } catch {
+      // Token 解析失败，跳转登录
       router.push('/login');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -39,8 +54,6 @@ export default function AdminLayout({ children, title }: AdminLayoutProps) {
   const handleLogout = () => {
     localStorage.removeItem('bep_platform_token');
     localStorage.removeItem('bep_platform_user');
-    localStorage.removeItem('bep_token');
-    localStorage.removeItem('bep_user');
     router.push('/login');
   };
 

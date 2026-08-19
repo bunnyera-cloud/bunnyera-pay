@@ -31,6 +31,11 @@ export default function LoginPage() {
         return;
       }
 
+      if (!data.success || !data.token) {
+        setError('登录失败，请重试');
+        return;
+      }
+
       if (tab === 'platform') {
         localStorage.setItem('bep_platform_token', data.token);
         localStorage.setItem('bep_platform_user', JSON.stringify(data.user));

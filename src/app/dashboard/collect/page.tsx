@@ -24,10 +24,8 @@ export default function CreateCollectPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
-  useEffect(() => {
-    const token = (localStorage.getItem('bep_merchant_token') || localStorage.getItem('bep_token'));
-    if (!token) { router.push('/login'); return; }
-    const userStr = (localStorage.getItem('bep_merchant_user') || localStorage.getItem('bep_user'));
+  const fetchData = async (token: string) => {
+    const userStr = localStorage.getItem('bep_merchant_user');
     if (userStr) {
       try { setMerchantName(JSON.parse(userStr).merchantName || ''); } catch {}
     }
@@ -42,6 +40,13 @@ export default function CreateCollectPage() {
         setStores(list);
       })
       .catch(() => {});
+  };
+
+  useEffect(() => {
+    const token = localStorage.getItem('bep_merchant_token');
+    if (!token) { router.push('/login'); return; }
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    fetchData(token);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -54,7 +59,7 @@ export default function CreateCollectPage() {
 
     setSubmitting(true);
     try {
-      const token = (localStorage.getItem('bep_merchant_token') || localStorage.getItem('bep_token'));
+      const token = localStorage.getItem('bep_merchant_token');
       const res = await fetch('/api/orders', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },

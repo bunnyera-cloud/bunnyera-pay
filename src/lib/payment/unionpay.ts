@@ -42,19 +42,17 @@ export class UnionPayProvider implements PaymentProvider {
     this.signMethod = '01'; // RSA
   }
 
-  // 银联签名
+  // 银联签名（生产环境需加载商户私钥证书）
   private sign(params: Record<string, string>): string {
-    // 银联签名逻辑
-    // 生产环境需要加载证书进行签名
-    console.warn('[UnionPay] Signing requires production certificate (not implemented)');
-    return 'SIGNATURE_PLACEHOLDER';
+    // production_not_configured: 需要商户私钥证书 (pfx/p12) 进行 RSA 签名
+    throw new Error('[UnionPay] Signing requires production certificate (production_not_configured)');
   }
 
-  // 银联验签
-  private verify(params: Record<string, string>, signature: string): boolean {
-    // 银联验签逻辑  
-    // 生产环境需要加载证书进行验签
-    console.warn('[UnionPay] Verification requires production certificate (not implemented)');
+  // 银联验签（生产环境需加载银联公钥证书）
+  private verify(params: Record<string, string>, _signature: string): boolean {
+    // production_not_configured: 需要银联公钥证书进行验签
+    // fail closed: 缺少证书直接拒绝
+    console.warn('[UnionPay] Verification requires UnionPay public key certificate (production_not_configured)');
     return false;
   }
 
@@ -111,21 +109,15 @@ export class UnionPayProvider implements PaymentProvider {
       return { status: 'UNKNOWN' };
     }
 
-    // 模拟查询结果
-    return {
-      status: 'UNKNOWN',
-      tradeNo: params.tradeNo,
-    };
+    // production_not_configured: 需要调用银联订单查询 API
+    console.warn('[UnionPay] Order query requires production API integration (production_not_configured)');
+    return { status: 'UNKNOWN' };
   }
 
-  async closeOrder(params: CloseOrderParams): Promise<boolean> {
-    const configCheck = this.checkConfig();
-    if (!configCheck.configured) {
-      return false;
-    }
-
-    // 银联订单关闭逻辑
-    return true;
+  async closeOrder(_params: CloseOrderParams): Promise<boolean> {
+    // production_not_configured: 需要调用银联订单关闭 API
+    console.warn('[UnionPay] Close order requires production API integration (production_not_configured)');
+    return false;
   }
 
   async refund(params: RefundParams): Promise<RefundResult> {
@@ -137,15 +129,9 @@ export class UnionPayProvider implements PaymentProvider {
       };
     }
 
-    try {
-      // 银联退款逻辑
-      return {
-        success: true,
-        channelRefundNo: `UNIONPAY_REF_${Date.now()}`
-      };
-    } catch (error) {
-      return { success: false, error: (error as Error).message };
-    }
+    // production_not_configured: 需要调用银联退款 API
+    console.warn('[UnionPay] Refund requires production API integration (production_not_configured)');
+    return { success: false, error: 'UnionPay refund not yet integrated (production_not_configured)' };
   }
 
   async queryRefund(params: QueryRefundParams): Promise<RefundQueryResult> {
@@ -154,10 +140,9 @@ export class UnionPayProvider implements PaymentProvider {
       return { status: 'UNKNOWN' };
     }
 
-    // 模拟退款查询结果
-    return {
-      status: 'UNKNOWN',
-    };
+    // production_not_configured: 需要调用银联退款查询 API
+    console.warn('[UnionPay] Refund query requires production API integration (production_not_configured)');
+    return { status: 'UNKNOWN' };
   }
 
   verifyCallback(body: unknown, headers: Record<string, string>): boolean {

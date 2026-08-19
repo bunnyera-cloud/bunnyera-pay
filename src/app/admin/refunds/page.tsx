@@ -38,7 +38,7 @@ export default function AdminRefundsPage() {
   const [statusFilter, setStatusFilter] = useState('');
   const [actionLoading, setActionLoading] = useState<string | null>(null);
 
-  const getToken = () => typeof window !== 'undefined' ? localStorage.getItem('bep_token') : null;
+  const getToken = () => typeof window !== 'undefined' ? localStorage.getItem('bep_platform_token') : null;
 
   const fetchRefunds = useCallback(async () => {
     const token = getToken();

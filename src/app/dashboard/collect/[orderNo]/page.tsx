@@ -55,7 +55,7 @@ export default function CollectQrPage() {
   const [countdown, setCountdown] = useState<number | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const token = () => (typeof window === 'undefined' ? '' : (localStorage.getItem('bep_merchant_token') || localStorage.getItem('bep_token')) || '');
+  const token = () => (typeof window === 'undefined' ? '' : localStorage.getItem('bep_merchant_token') || '');
 
   const load = useCallback(async () => {
     const res = await fetch(`/api/orders/${orderNo}`, { headers: { Authorization: `Bearer ${token()}` } });
@@ -80,6 +80,7 @@ export default function CollectQrPage() {
   // 初始化 + 轮询
   useEffect(() => {
     if (!token()) { router.push('/login'); return; }
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     load();
     timerRef.current = setInterval(() => { sync(); }, 4000);
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
@@ -96,6 +97,7 @@ export default function CollectQrPage() {
 
   // 生成二维码
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!order?.payData) { setQrDataUrl(''); return; }
     QRCode.toDataURL(order.payData, { width: 640, margin: 1, errorCorrectionLevel: 'M' })
       .then(setQrDataUrl)
@@ -104,6 +106,7 @@ export default function CollectQrPage() {
 
   // 有效期倒计时
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!order?.expiredAt) { setCountdown(null); return; }
     const tick = () => {
       const left = Math.floor((new Date(order.expiredAt!).getTime() - Date.now()) / 1000);

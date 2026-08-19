@@ -44,7 +44,7 @@ export default function StoresPage() {
 
   const fetchStores = async () => {
     try {
-      const token = (localStorage.getItem('bep_merchant_token') || localStorage.getItem('bep_token'));
+      const token = localStorage.getItem('bep_merchant_token');
       const res = await fetch('/api/stores', {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -60,7 +60,7 @@ export default function StoresPage() {
   };
 
   useEffect(() => {
-    const token = (localStorage.getItem('bep_merchant_token') || localStorage.getItem('bep_token'));
+    const token = localStorage.getItem('bep_merchant_token');
     if (!token) { router.push('/login'); return; }
     // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchStores();
@@ -71,7 +71,7 @@ export default function StoresPage() {
     e.preventDefault();
     setSubmitting(true);
     try {
-      const token = (localStorage.getItem('bep_merchant_token') || localStorage.getItem('bep_token'));
+      const token = localStorage.getItem('bep_merchant_token');
       const res = await fetch('/api/stores', {
         method: 'POST',
         headers: {
@@ -137,7 +137,7 @@ export default function StoresPage() {
             <span>🖥️</span>
             <span>收银台</span>
           </Link>
-          <button onClick={() => { localStorage.removeItem('bep_token'); localStorage.removeItem('bep_user'); router.push('/login'); }} className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-gray-400 hover:bg-white/5 hover:text-white text-sm transition">
+          <button onClick={() => { localStorage.removeItem('bep_merchant_token'); localStorage.removeItem('bep_merchant_user'); router.push('/login'); }} className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-gray-400 hover:bg-white/5 hover:text-white text-sm transition">
             <span>🚪</span>
             <span>退出登录</span>
           </button>

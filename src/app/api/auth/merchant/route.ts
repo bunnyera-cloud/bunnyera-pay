@@ -56,7 +56,6 @@ export async function POST(request: NextRequest) {
       where: { id: member.id },
       data: {
         lastLoginAt: new Date(),
-        lastLoginIp: request.headers.get('x-forwarded-for') || 'unknown',
         loginAttempts: 0
       }
     });

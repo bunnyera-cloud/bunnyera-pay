@@ -4,10 +4,13 @@ import { Prisma, OrderStatus, PaymentChannel } from '@prisma/client';
 import { withAuth, successResponse, errorResponse } from '@/lib/api-utils';
 import { generateOrderNo } from '@/lib/auth';
 import { AlipayProvider } from '@/lib/payment/alipay';
+import { WechatPayProvider } from '@/lib/payment/wechat';
+import { UnionPayProvider } from '@/lib/payment/unionpay';
 import {
   resolveAlipayConfig,
   resolveAlipayNotifyUrl,
   resolvePaymentEnv,
+  resolveBaseUrl,
 } from '@/lib/payment/config';
 import { z } from 'zod';
 
@@ -92,20 +95,19 @@ export async function POST(request: NextRequest) {
     // 调用支付渠道创建支付
     try {
       const paymentEnv = resolvePaymentEnv();
-      const isAlipay = data.channel.startsWith('ALIPAY');
-      const alipay = resolveAlipayConfig(paymentConfig);
+      const baseUrl = resolveBaseUrl(req.headers);
       const notifyUrl = resolveAlipayNotifyUrl(req.headers, paymentConfig?.notifyUrl);
+      const isConfigured = !!(paymentConfig && paymentConfig.isActive);
 
       // PREVIEW：渠道尚未配置或未审核通过时，生成 BunnyEra Pay 自有预览支付链接。
-      // 该二维码明确标记为非真实收款，绝不会被标记为支付成功。
-      if (!isAlipay || !alipay.usable || paymentEnv === 'PREVIEW') {
-        const baseUrl = notifyUrl.replace(/\/api\/pay\/alipay\/notify$/, '');
+      if (!isConfigured || paymentEnv === 'PREVIEW') {
         const previewPayData = `${baseUrl}/preview/pay/${orderNo}`;
         const updated = await prisma.order.update({
           where: { id: order.id },
           data: { status: 'PAYING', payData: previewPayData, paymentEnv: 'PREVIEW' },
         });
 
+        const missingReason = !isConfigured ? '渠道未配置' : '演示预览模式';
         return successResponse({
           orderId: updated.id,
           orderNo: updated.orderNo,
@@ -113,38 +115,88 @@ export async function POST(request: NextRequest) {
           payData: previewPayData,
           paymentEnv: 'PREVIEW',
           notifyUrl,
-          message:
-            alipay.missing.length > 0
-              ? `演示预览模式（缺少配置: ${alipay.missing.join(', ')}）`
-              : '演示预览模式',
+          message: missingReason,
         });
       }
 
-      const provider = new AlipayProvider({
-        appId: alipay.appId,
-        privateKey: alipay.privateKey,
-        publicKey: alipay.publicKey,
-        gateway: alipay.gateway,
-        channel: data.channel,
-      });
+      // 根据渠道类型调用不同 Provider
+      let payResult: { success: boolean; payData?: string; tradeNo?: string; error?: string };
 
-      const result = await provider.createPayment({
-        orderNo,
-        amount: data.amount,
-        subject: data.subject,
-        notifyUrl,
-        returnUrl: data.returnUrl,
-        clientIp: data.clientIp,
-        extraParams: data.extraParams,
-      });
+      if (data.channel.startsWith('ALIPAY')) {
+        const alipay = resolveAlipayConfig(paymentConfig);
+        if (!alipay.usable) {
+          return errorResponse(`支付宝配置缺失: ${alipay.missing.join(', ')}`, 502);
+        }
+        const provider = new AlipayProvider({
+          appId: alipay.appId,
+          privateKey: alipay.privateKey,
+          publicKey: alipay.publicKey,
+          gateway: alipay.gateway,
+          channel: data.channel,
+        });
+        payResult = await provider.createPayment({
+          orderNo,
+          amount: data.amount,
+          subject: data.subject,
+          notifyUrl,
+          returnUrl: data.returnUrl,
+          clientIp: data.clientIp,
+          extraParams: data.extraParams,
+        });
+      } else if (data.channel.startsWith('WECHAT')) {
+        const wechatUsable = paymentConfig?.appId && paymentConfig?.mchId && paymentConfig?.apiKey && paymentConfig?.serialNo && paymentConfig?.privateKey;
+        if (!wechatUsable) {
+          return errorResponse('微信支付渠道未配置', 502);
+        }
+        const provider = new WechatPayProvider({
+          appId: paymentConfig.appId!,
+          mchId: paymentConfig.mchId!,
+          apiKey: paymentConfig.apiKey || '',
+          serialNo: paymentConfig.serialNo || '',
+          privateKey: paymentConfig.privateKey || '',
+          channel: data.channel,
+        });
+        payResult = await provider.createPayment({
+          orderNo,
+          amount: data.amount,
+          subject: data.subject,
+          notifyUrl: `${baseUrl}/api/pay/wechat/notify`,
+          returnUrl: data.returnUrl,
+          clientIp: data.clientIp,
+          extraParams: data.extraParams,
+        });
+      } else if (data.channel.startsWith('UNIONPAY')) {
+        const unionpayUsable = paymentConfig?.unionpayMchId && paymentConfig?.unionpayCert;
+        if (!unionpayUsable) {
+          return errorResponse('银联支付渠道未配置', 502);
+        }
+        const provider = new UnionPayProvider({
+          merId: paymentConfig.unionpayMchId || '',
+          certPath: paymentConfig.unionpayCert || '',
+          certPass: paymentConfig.certPath || process.env.UNIONPAY_CERT_PASSWORD || '',
+          gateway: paymentConfig.gateway || process.env.UNIONPAY_GATEWAY || 'https://gateway.95516.com',
+          channel: data.channel,
+        });
+        payResult = await provider.createPayment({
+          orderNo,
+          amount: data.amount,
+          subject: data.subject,
+          notifyUrl: `${baseUrl}/api/pay/unionpay/notify`,
+          returnUrl: data.returnUrl,
+          clientIp: data.clientIp,
+          extraParams: data.extraParams,
+        });
+      } else {
+        return errorResponse(`不支持的支付渠道: ${data.channel}`, 400);
+      }
 
-      if (result.success && result.payData) {
+      if (payResult.success && payResult.payData) {
         await prisma.order.update({
           where: { id: order.id },
           data: {
             status: 'PAYING',
-            channelTradeNo: result.tradeNo,
-            payData: result.payData,
+            channelTradeNo: payResult.tradeNo,
+            payData: payResult.payData,
             paymentEnv,
           },
         });
@@ -153,8 +205,8 @@ export async function POST(request: NextRequest) {
           orderId: order.id,
           orderNo: order.orderNo,
           status: 'PAYING',
-          payData: result.payData,
-          tradeNo: result.tradeNo,
+          payData: payResult.payData,
+          tradeNo: payResult.tradeNo,
           paymentEnv,
           notifyUrl,
         });
@@ -164,7 +216,7 @@ export async function POST(request: NextRequest) {
         where: { id: order.id },
         data: { status: 'FAILED', paymentEnv },
       });
-      return errorResponse(`支付创建失败: ${result.error || '支付渠道未返回支付内容'}`, 502);
+      return errorResponse(`支付创建失败: ${payResult.error || '支付渠道未返回支付内容'}`, 502);
     } catch (error) {
       console.error('Payment creation error:', (error as Error).message);
       await prisma.order.update({ where: { id: order.id }, data: { status: 'FAILED' } });
@@ -182,6 +234,7 @@ export async function GET(request: NextRequest) {
     const status = url.searchParams.get('status');
     const channel = url.searchParams.get('channel');
     const orderNo = url.searchParams.get('orderNo');
+    const storeId = url.searchParams.get('storeId');
     const startDate = url.searchParams.get('startDate');
     const endDate = url.searchParams.get('endDate');
 
@@ -189,6 +242,7 @@ export async function GET(request: NextRequest) {
     if (status) where.status = status as OrderStatus;
     if (channel) where.channel = channel as PaymentChannel;
     if (orderNo) where.orderNo = { contains: orderNo };
+    if (storeId) where.storeId = storeId;
     if (startDate || endDate) {
       where.createdAt = {};
       if (startDate) where.createdAt.gte = new Date(startDate);
@@ -212,6 +266,7 @@ export async function GET(request: NextRequest) {
           scene: true,
           status: true,
           channelTradeNo: true,
+          storeId: true,
           paidAt: true,
           expiredAt: true,
           createdAt: true,
@@ -220,9 +275,25 @@ export async function GET(request: NextRequest) {
       prisma.order.count({ where }),
     ]);
 
+    // 批量查询分店名称
+    const storeIds = [...new Set(orders.map(o => o.storeId).filter((s): s is string => !!s))];
+    const storeMap = new Map<string, { name: string; brandName: string }>();
+    if (storeIds.length > 0) {
+      const stores = await prisma.store.findMany({
+        where: { id: { in: storeIds } },
+        include: { brand: { select: { name: true } } },
+      });
+      stores.forEach(s => storeMap.set(s.id, { name: s.name, brandName: s.brand.name }));
+    }
+
     return NextResponse.json({
       success: true,
-      data: orders,
+      data: orders.map(o => ({
+        ...o,
+        amount: Number(o.amount),
+        storeName: o.storeId ? storeMap.get(o.storeId)?.name ?? null : null,
+        brandName: o.storeId ? storeMap.get(o.storeId)?.brandName ?? null : null,
+      })),
       pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) },
     });
   }, ['MERCHANT_OWNER', 'MERCHANT_ADMIN', 'FINANCE', 'STORE_MANAGER', 'CASHIER', 'CUSTOMER_SERVICE']);

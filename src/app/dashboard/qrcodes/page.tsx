@@ -44,7 +44,7 @@ export default function QRCodesPage() {
 
   const fetchData = async () => {
     try {
-      const token = (localStorage.getItem('bep_merchant_token') || localStorage.getItem('bep_token'));
+      const token = localStorage.getItem('bep_merchant_token');
       const [qrRes, storeRes] = await Promise.all([
         fetch('/api/qrcodes', { headers: { Authorization: `Bearer ${token}` } }),
         fetch('/api/stores', { headers: { Authorization: `Bearer ${token}` } }),
@@ -70,7 +70,7 @@ export default function QRCodesPage() {
   };
 
   useEffect(() => {
-    const token = (localStorage.getItem('bep_merchant_token') || localStorage.getItem('bep_token'));
+    const token = localStorage.getItem('bep_merchant_token');
     if (!token) { router.push('/login'); return; }
     // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchData();
@@ -93,9 +93,13 @@ export default function QRCodesPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!form.storeId) {
+      alert('请选择关联分店');
+      return;
+    }
     setSubmitting(true);
     try {
-      const token = (localStorage.getItem('bep_merchant_token') || localStorage.getItem('bep_token'));
+      const token = localStorage.getItem('bep_merchant_token');
       const res = await fetch('/api/qrcodes', {
         method: 'POST',
         headers: {
@@ -105,7 +109,7 @@ export default function QRCodesPage() {
         body: JSON.stringify({
           type: form.type,
           name: form.name,
-          storeId: form.storeId || undefined,
+          storeId: form.storeId,
           amount: form.amount ? parseFloat(form.amount) : undefined,
         }),
       });
@@ -168,7 +172,7 @@ export default function QRCodesPage() {
             <span>️</span>
             <span>收银台</span>
           </Link>
-          <button onClick={() => { localStorage.removeItem('bep_token'); localStorage.removeItem('bep_user'); router.push('/login'); }} className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-gray-400 hover:bg-white/5 hover:text-white text-sm transition">
+          <button onClick={() => { localStorage.removeItem('bep_merchant_token'); localStorage.removeItem('bep_merchant_user'); router.push('/login'); }} className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-gray-400 hover:bg-white/5 hover:text-white text-sm transition">
             <span>🚪</span>
             <span>退出登录</span>
           </button>
@@ -288,13 +292,14 @@ export default function QRCodesPage() {
                 />
               </div>
               <div>
-                <label className="block text-sm text-gray-300 mb-1">关联门店</label>
+                <label className="block text-sm text-gray-300 mb-1">关联分店（必选）</label>
                 <select
                   value={form.storeId}
                   onChange={e => setForm(p => ({ ...p, storeId: e.target.value }))}
+                  required
                   className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-blue-500 [&>option]:bg-slate-800 [&>option]:text-white"
                 >
-                  <option value="">不关联门店</option>
+                  <option value="">请选择分店</option>
                   {stores.map(s => (
                     <option key={s.id} value={s.id}>{s.brand.name} - {s.name}</option>
                   ))}

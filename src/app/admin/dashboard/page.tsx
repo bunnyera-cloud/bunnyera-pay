@@ -30,7 +30,7 @@ export default function AdminDashboardPage() {
   };
 
   useEffect(() => {
-    const token = localStorage.getItem('bep_platform_token') || localStorage.getItem('bep_token');
+    const token = localStorage.getItem('bep_platform_token');
     if (!token) { router.push('/login'); return; }
     // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchStats(token);
@@ -40,8 +40,6 @@ export default function AdminDashboardPage() {
   const handleLogout = () => {
     localStorage.removeItem('bep_platform_token');
     localStorage.removeItem('bep_platform_user');
-    localStorage.removeItem('bep_token');
-    localStorage.removeItem('bep_user');
     router.push('/login');
   };
 

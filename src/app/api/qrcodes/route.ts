@@ -6,10 +6,11 @@ import { z } from 'zod';
 const createQRSchema = z.object({
   type: z.enum(['FIXED', 'DYNAMIC']),
   name: z.string().min(1).max(100),
-  storeId: z.string().optional(),
+  // 聚合收款码必须绑定分店，保证分店独立归属
+  storeId: z.string().min(1, '请选择分店'),
   departmentId: z.string().optional(),
   counterId: z.string().optional(),
-  amount: z.number().positive().optional(), // 动态码固定金额
+  amount: z.number().positive().optional(), // 固定码固定金额
 });
 
 // 生成二维码编号
@@ -33,14 +34,15 @@ export async function POST(request: NextRequest) {
     const data = validation.data;
     const merchantId = ctx.user.merchantId!;
 
-    // 验证门店归属
-    if (data.storeId) {
-      const store = await prisma.store.findFirst({
-        where: { id: data.storeId, brand: { merchantId } },
-      });
-      if (!store) {
-        return errorResponse('门店不存在或不属于当前商户', 400);
-      }
+    // 验证门店归属（必须属于当前商户，不能串店）
+    const store = await prisma.store.findFirst({
+      where: { id: data.storeId, brand: { merchantId } },
+    });
+    if (!store) {
+      return errorResponse('门店不存在或不属于当前商户', 400);
+    }
+    if (!store.isActive) {
+      return errorResponse('该门店已停用，请选择其他分店', 400);
     }
 
     const code = generateQRCode();

@@ -77,8 +77,8 @@ export default function RegisterPage() {
       }
 
       if (data.data.token) {
-        localStorage.setItem('bep_token', data.data.token);
-        localStorage.setItem('bep_user', JSON.stringify({
+        localStorage.setItem('bep_merchant_token', data.data.token);
+        localStorage.setItem('bep_merchant_user', JSON.stringify({
           merchantId: data.data.merchantId,
           merchantNo: data.data.merchantNo,
         }));

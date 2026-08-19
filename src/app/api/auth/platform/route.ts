@@ -15,7 +15,7 @@ export async function POST(request: NextRequest) {
     }
 
     // 查找平台用户
-    const user = await prisma.platformUser.findUnique({
+    const user = await prisma.platformUser.findFirst({
       where: { email, isActive: true }
     });
 

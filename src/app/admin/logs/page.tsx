@@ -19,7 +19,7 @@ export default function AdminLogsPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const token = typeof window !== 'undefined' ? localStorage.getItem('bep_token') : null;
+    const token = typeof window !== 'undefined' ? localStorage.getItem('bep_platform_token') : null;
     if (!token) return;
     fetch('/api/admin/logs', { headers: { Authorization: `Bearer ${token}` } })
       .then(r => r.json())

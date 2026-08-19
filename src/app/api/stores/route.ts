@@ -1,7 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/db';
-import { withAuth, successResponse } from '@/lib/api-utils';
+import { withAuth, successResponse, errorResponse } from '@/lib/api-utils';
 import { z } from 'zod';
+
+// 业务规则：每个商户主体最多 10 个分店（跨品牌合计）
+export const MAX_STORES_PER_MERCHANT = 10;
+
+// 用于在事务内中断流程并返回业务错误
+class StoreLimitError extends Error {}
 
 const storeSchema = z.object({
   brandName: z.string().min(1),
@@ -30,6 +36,14 @@ export async function POST(request: NextRequest) {
     const data = validation.data;
 
     const result = await prisma.$transaction(async (tx) => {
+      // 服务端强制 10 店限制：统计该商户旗下所有品牌的门店总数
+      const storeCount = await tx.store.count({
+        where: { brand: { merchantId } },
+      });
+      if (storeCount >= MAX_STORES_PER_MERCHANT) {
+        throw new StoreLimitError();
+      }
+
       // 创建或获取品牌
       let brand = await tx.brand.findFirst({
         where: { merchantId, code: data.brandCode },
@@ -63,7 +77,14 @@ export async function POST(request: NextRequest) {
       }
 
       return store;
+    }).catch((err) => {
+      if (err instanceof StoreLimitError) return null;
+      throw err;
     });
+
+    if (!result) {
+      return errorResponse(`每个商户最多可创建 ${MAX_STORES_PER_MERCHANT} 个分店`, 400);
+    }
 
     return successResponse(result, '门店创建成功');
   }, ['MERCHANT_OWNER', 'MERCHANT_ADMIN']);

@@ -18,7 +18,7 @@ export default function CashierPage() {
       if (!amount || !subject) return;
       setLoading(true);
       try {
-        const token = (localStorage.getItem('bep_merchant_token') || localStorage.getItem('bep_token'));
+        const token = localStorage.getItem('bep_merchant_token');
         const res = await fetch('/api/orders', {
           method: 'POST',
           headers: {

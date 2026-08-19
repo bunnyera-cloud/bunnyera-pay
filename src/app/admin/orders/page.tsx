@@ -47,7 +47,7 @@ export default function AdminOrdersPage() {
   const [channelFilter, setChannelFilter] = useState('');
   const [orderNoSearch, setOrderNoSearch] = useState('');
 
-  const getToken = () => typeof window !== 'undefined' ? localStorage.getItem('bep_token') : null;
+  const getToken = () => typeof window !== 'undefined' ? localStorage.getItem('bep_platform_token') : null;
 
   const fetchOrders = useCallback(async () => {
     const token = getToken();

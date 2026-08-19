@@ -60,7 +60,7 @@ function MerchantsContent() {
   const [showDetailModal, setShowDetailModal] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
 
-  const getToken = () => typeof window !== 'undefined' ? localStorage.getItem('bep_token') : null;
+  const getToken = () => typeof window !== 'undefined' ? localStorage.getItem('bep_platform_token') : null;
 
   const fetchMerchants = useCallback(async () => {
     const token = getToken();
@@ -399,6 +399,44 @@ function MerchantsContent() {
                   </div>
                 </div>
               )}
+              {detailData.storeStructure ? (
+                <div>
+                  <h4 className="text-gray-700 font-medium mt-4 mb-2">
+                    分店结构（{String((detailData.storeStructure as Record<string, unknown>).storeCount)} / {String((detailData.storeStructure as Record<string, unknown>).maxStores)}）
+                  </h4>
+                  {((detailData.storeStructure as Record<string, unknown>).stores as Record<string, unknown>[]).length === 0 ? (
+                    <p className="text-gray-400 text-sm">该商户尚未创建分店</p>
+                  ) : (
+                    <div className="border border-gray-100 rounded-lg overflow-hidden">
+                      <table className="w-full text-sm">
+                        <thead className="bg-gray-50">
+                          <tr>
+                            <th className="text-left px-3 py-2 text-gray-500">分店</th>
+                            <th className="text-left px-3 py-2 text-gray-500">品牌</th>
+                            <th className="text-left px-3 py-2 text-gray-500">收款码数</th>
+                            <th className="text-left px-3 py-2 text-gray-500">累计支付订单</th>
+                            <th className="text-left px-3 py-2 text-gray-500">累计交易金额</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {((detailData.storeStructure as Record<string, unknown>).stores as Record<string, unknown>[]).map((st, i) => (
+                            <tr key={i} className="border-t border-gray-50">
+                              <td className="px-3 py-2 text-gray-900">
+                                {String(st.storeName)}
+                                {st.isActive === false && <span className="ml-1 text-xs text-red-500">已停用</span>}
+                              </td>
+                              <td className="px-3 py-2 text-gray-600">{String(st.brandName)}</td>
+                              <td className="px-3 py-2 text-gray-600">{String(st.qrcodeCount)}</td>
+                              <td className="px-3 py-2 text-gray-600">{String(st.paidOrderCount)}</td>
+                              <td className="px-3 py-2 text-gray-900">¥{Number(st.paidAmount).toFixed(2)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              ) : null}
             </div>
           </div>
         </div>
