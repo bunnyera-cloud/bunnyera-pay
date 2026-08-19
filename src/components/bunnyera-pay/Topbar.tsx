@@ -1,5 +1,6 @@
 'use client';
 
+import Image from 'next/image';
 import { MenuIcon } from './icons';
 
 export interface MerchantUserInfo {
@@ -25,6 +26,14 @@ export default function Topbar({
         <button onClick={onMenuClick} className="lg:hidden text-slate-500 hover:text-slate-700" aria-label="打开菜单">
           <MenuIcon className="w-6 h-6" />
         </button>
+        {/* 移动端侧边栏隐藏时，顶栏展示品牌标识 */}
+        <Image
+          src="/brand/bunnyera-pay/logo/logo-horizontal.png"
+          alt="BunnyEra Pay"
+          width={404}
+          height={64}
+          className="h-6 w-auto lg:hidden"
+        />
         <div className="hidden sm:block text-sm text-slate-500">
           {user?.merchantName || user?.merchantNo || '商户中心'}
         </div>

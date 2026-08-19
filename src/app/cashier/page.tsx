@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import Image from 'next/image';
 import QRCode from 'qrcode';
 
 export default function CashierPage() {
@@ -63,10 +64,15 @@ export default function CashierPage() {
     <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
       <div className="w-full max-w-lg bg-white/5 backdrop-blur-sm border border-white/10 rounded-2xl p-8">
         <div className="text-center mb-6">
-          <div className="w-12 h-12 bg-gradient-to-br from-blue-400 to-purple-500 rounded-xl flex items-center justify-center mx-auto mb-3">
-            <span className="text-white font-bold text-lg">B</span>
-          </div>
-          <h1 className="text-white text-xl font-bold">BunnyEra Pay 收银台</h1>
+          {/* 深色背景使用白色版正式 logo，保持等比 */}
+          <Image
+            src="/brand/bunnyera-pay/logo/logo-horizontal-white.png"
+            alt="BunnyEra Pay"
+            width={404}
+            height={64}
+            className="h-8 w-auto mx-auto mb-3"
+          />
+          <h1 className="text-white text-xl font-bold">收银台</h1>
           <p className="text-gray-400 text-sm mt-1">扫码支付</p>
         </div>
 

@@ -1,3 +1,4 @@
+import Image from 'next/image';
 import Link from 'next/link';
 import {
   QrIcon,
@@ -26,11 +27,15 @@ export default function HomePage() {
       <nav className="fixed top-0 left-0 right-0 z-50 bg-white/95 backdrop-blur border-b border-slate-200">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-16">
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
-                <span className="text-white font-bold text-sm">B</span>
-              </div>
-              <span className="text-slate-900 font-bold text-lg">BunnyEra Pay</span>
+            <div className="flex items-center">
+              <Image
+                src="/brand/bunnyera-pay/logo/logo-horizontal.png"
+                alt="BunnyEra Pay"
+                width={404}
+                height={64}
+                className="h-[38px] w-auto"
+                priority
+              />
             </div>
             <div className="hidden md:flex items-center gap-8">
               <a href="#products" className="text-slate-600 hover:text-blue-600 text-sm font-medium transition">支付产品</a>
@@ -394,11 +399,14 @@ export default function HomePage() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-14">
           <div className="grid md:grid-cols-4 gap-10">
             <div>
-              <div className="flex items-center gap-2 mb-4">
-                <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
-                  <span className="text-white font-bold text-sm">B</span>
-                </div>
-                <span className="text-white font-bold text-lg">BunnyEra Pay</span>
+              <div className="flex items-center mb-4">
+                <Image
+                  src="/brand/bunnyera-pay/logo/logo-horizontal-white.png"
+                  alt="BunnyEra Pay"
+                  width={404}
+                  height={64}
+                  className="h-8 w-auto"
+                />
               </div>
               <p className="text-slate-400 text-sm leading-relaxed">多商户支付管理平台</p>
               <p className="text-slate-500 text-xs mt-3">运营主体：BUNNYERA LLC</p>

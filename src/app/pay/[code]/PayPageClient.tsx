@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Image from 'next/image';
 import QRCode from 'qrcode';
 
 interface QRCodeInfo {
@@ -128,9 +129,14 @@ export default function PayPageClient({ qrCode, channels, paymentEnv, paymentEnv
       <div className="w-full max-w-md">
         {/* 商户信息 */}
         <div className="text-center mb-6">
-          <div className="w-14 h-14 bg-gradient-to-br from-blue-400 to-purple-500 rounded-2xl flex items-center justify-center mx-auto mb-3 shadow-lg shadow-blue-500/20">
-            <span className="text-white font-bold text-xl">B</span>
-          </div>
+          {/* 深色背景使用白色版品牌 mark，保持等比 */}
+          <Image
+            src="/brand/bunnyera-pay/mark/mark-white.png"
+            alt="BunnyEra Pay"
+            width={275}
+            height={117}
+            className="h-10 w-auto mx-auto mb-3"
+          />
           <h1 className="text-white text-xl font-bold">{qrCode.merchantName}</h1>
           {qrCode.storeName && (
             <p className="text-gray-400 text-sm mt-1">{qrCode.brandName && `${qrCode.brandName} · `}{qrCode.storeName}</p>

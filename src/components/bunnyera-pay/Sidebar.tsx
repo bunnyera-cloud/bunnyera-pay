@@ -1,5 +1,6 @@
 'use client';
 
+import Image from 'next/image';
 import Link from 'next/link';
 import {
   DashboardIcon,
@@ -30,13 +31,18 @@ const NAV_ITEMS = [
   { href: '/dashboard/settings', label: '商户设置', Icon: SettingsIcon },
 ];
 
+// 品牌标识：使用正式 logo 资产（原图 404x64，侧边栏展示高 32px，保持等比）
 export function BrandLogo() {
   return (
-    <Link href="/dashboard" className="flex items-center gap-2.5">
-      <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center flex-shrink-0">
-        <span className="text-white font-bold text-sm">B</span>
-      </div>
-      <span className="text-slate-900 font-bold">BunnyEra Pay</span>
+    <Link href="/dashboard" className="flex items-center">
+      <Image
+        src="/brand/bunnyera-pay/logo/logo-horizontal.png"
+        alt="BunnyEra Pay"
+        width={404}
+        height={64}
+        className="h-8 w-auto"
+        priority
+      />
     </Link>
   );
 }

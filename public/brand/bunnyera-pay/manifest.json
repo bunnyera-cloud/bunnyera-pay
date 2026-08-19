@@ -1,0 +1,21 @@
+{
+  "brand": "BunnyEra Pay",
+  "tagline": "SECURE PAYMENT INFRASTRUCTURE",
+  "colors": {
+    "navy": "#0B1423",
+    "gold": "#C79A4E",
+    "gray": "#6B7280",
+    "offWhite": "#F2F4F7"
+  },
+  "defaultUsage": {
+    "header": "logo/logo-horizontal.png",
+    "mobileHeader": "logo/logo-horizontal.png or mark/mark-primary.png",
+    "login": "logo/logo-primary.png",
+    "adminSidebar": "logo/logo-horizontal.png",
+    "collapsedSidebar": "mark/mark-primary.png",
+    "invoice": "logo/logo-horizontal.png",
+    "favicon": "favicon/favicon.ico",
+    "darkBackground": "*-white.png"
+  },
+  "note": "Assets reconstructed from the supplied 1536x1024 brand guideline raster. PNG is the source of truth; do not auto-trace into inaccurate vector paths."
+}

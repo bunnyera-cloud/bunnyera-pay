@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import Image from 'next/image';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
@@ -53,27 +54,31 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-slate-900 via-blue-900 to-slate-900 flex items-center justify-center px-4">
+    <div className="min-h-screen bg-slate-50 flex items-center justify-center px-4">
       <div className="w-full max-w-md">
-        {/* Logo */}
+        {/* Logo：浅色背景使用主色版正式 logo（原图 428x263，登录页宽 240px 等比） */}
         <div className="text-center mb-8">
-          <Link href="/" className="inline-flex items-center gap-2">
-            <div className="w-10 h-10 bg-gradient-to-br from-blue-400 to-purple-500 rounded-xl flex items-center justify-center">
-              <span className="text-white font-bold">B</span>
-            </div>
-            <span className="text-white font-semibold text-2xl">BunnyEra Pay</span>
+          <Link href="/" className="inline-flex">
+            <Image
+              src="/brand/bunnyera-pay/logo/logo-primary.png"
+              alt="BunnyEra Pay"
+              width={240}
+              height={147}
+              className="w-60 h-auto"
+              priority
+            />
           </Link>
-          <p className="text-gray-400 mt-2">多商户支付管理平台</p>
+          <p className="text-slate-500 mt-2">多商户支付管理平台</p>
         </div>
 
         {/* 登录卡片 */}
-        <div className="bg-white/5 backdrop-blur-sm border border-white/10 rounded-2xl p-8">
+        <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-8">
           {/* Tab */}
-          <div className="flex rounded-lg bg-white/5 p-1 mb-6">
+          <div className="flex rounded-lg bg-slate-100 p-1 mb-6">
             <button
               onClick={() => setTab('merchant')}
               className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition ${
-                tab === 'merchant' ? 'bg-blue-500 text-white' : 'text-gray-400 hover:text-white'
+                tab === 'merchant' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-900'
               }`}
             >
               商户登录
@@ -81,7 +86,7 @@ export default function LoginPage() {
             <button
               onClick={() => setTab('platform')}
               className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition ${
-                tab === 'platform' ? 'bg-blue-500 text-white' : 'text-gray-400 hover:text-white'
+                tab === 'platform' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-900'
               }`}
             >
               管理员登录
@@ -90,30 +95,30 @@ export default function LoginPage() {
 
           <form onSubmit={handleLogin} className="space-y-4">
             <div>
-              <label className="block text-sm text-gray-300 mb-1">邮箱</label>
+              <label className="block text-sm text-slate-600 mb-1">邮箱</label>
               <input
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 transition"
+                className="w-full bg-white border border-slate-200 rounded-lg px-4 py-2.5 text-slate-900 placeholder-slate-400 focus:outline-none focus:border-blue-600 transition"
                 placeholder="请输入登录邮箱"
                 required
               />
             </div>
             <div>
-              <label className="block text-sm text-gray-300 mb-1">密码</label>
+              <label className="block text-sm text-slate-600 mb-1">密码</label>
               <input
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 transition"
+                className="w-full bg-white border border-slate-200 rounded-lg px-4 py-2.5 text-slate-900 placeholder-slate-400 focus:outline-none focus:border-blue-600 transition"
                 placeholder="请输入密码"
                 required
               />
             </div>
 
             {error && (
-              <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-3 text-red-400 text-sm">
+              <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-red-600 text-sm">
                 {error}
               </div>
             )}
@@ -121,7 +126,7 @@ export default function LoginPage() {
             <button
               type="submit"
               disabled={loading}
-              className="w-full bg-blue-500 hover:bg-blue-600 disabled:opacity-50 text-white py-3 rounded-lg font-medium transition"
+              className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white py-2.5 rounded-lg font-medium transition"
             >
               {loading ? '登录中...' : '登录'}
             </button>
@@ -129,9 +134,9 @@ export default function LoginPage() {
 
           {tab === 'merchant' && (
             <div className="mt-6 text-center">
-              <p className="text-gray-400 text-sm">
+              <p className="text-slate-500 text-sm">
                 还没有商户账号？{' '}
-                <Link href="/register" className="text-blue-400 hover:text-blue-300">
+                <Link href="/register" className="text-blue-600 hover:text-blue-700">
                   立即注册入驻
                 </Link>
               </p>
