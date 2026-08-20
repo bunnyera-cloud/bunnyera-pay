@@ -2,11 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/db';
 import { successResponse, errorResponse } from '@/lib/api-utils';
 import { generateOrderNo } from '@/lib/auth';
-import { AlipayProvider } from '@/lib/payment/alipay';
-import { WechatPayProvider } from '@/lib/payment/wechat';
-import { UnionPayProvider } from '@/lib/payment/unionpay';
+import { resolveProvider } from '@/lib/payment/resolver';
 import {
-  resolveAlipayConfig,
   resolveAlipayNotifyUrl,
   resolvePaymentEnv,
   resolveBaseUrl,
@@ -82,7 +79,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return errorResponse('请输入支付金额', 400);
   }
 
-  // 渠道配置校验（fail closed：未配置一律拒绝）
+  // 渠道配置校验（fail closed：未配置/不可用一律拒绝）
+  // Provider 实例化统一通过 resolveProvider 收口
   const paymentConfig = await prisma.paymentConfig.findFirst({
     where: { merchantId: merchant.id, channel: data.channel, isActive: true },
   });
@@ -90,15 +88,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return errorResponse('该支付方式未开通', 400);
   }
 
-  let channelReady = false;
-  if (data.channel === 'ALIPAY_BAR') {
-    channelReady = resolveAlipayConfig(paymentConfig).usable;
-  } else if (data.channel === 'WECHAT_NATIVE') {
-    channelReady = !!(paymentConfig.appId && paymentConfig.mchId && paymentConfig.apiKey && paymentConfig.serialNo && paymentConfig.privateKey);
-  } else if (data.channel === 'UNIONPAY_QR') {
-    channelReady = !!(paymentConfig.unionpayMchId && paymentConfig.unionpayCert);
-  }
-  if (!channelReady) {
+  const resolved = resolveProvider(data.channel, paymentConfig);
+  if (!resolved.provider || !resolved.usable) {
     return errorResponse('该支付方式未开通', 400);
   }
 
@@ -144,53 +135,18 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   // 调用真实支付渠道
   try {
-    let payResult: { success: boolean; payData?: string; tradeNo?: string; error?: string };
+    const notifyUrl = data.channel.startsWith('ALIPAY')
+      ? resolveAlipayNotifyUrl(request.headers, paymentConfig.notifyUrl)
+      : data.channel.startsWith('WECHAT')
+        ? `${baseUrl}/api/pay/wechat/notify`
+        : `${baseUrl}/api/pay/unionpay/notify`;
 
-    if (data.channel === 'ALIPAY_BAR') {
-      const alipay = resolveAlipayConfig(paymentConfig);
-      const provider = new AlipayProvider({
-        appId: alipay.appId,
-        privateKey: alipay.privateKey,
-        publicKey: alipay.publicKey,
-        gateway: alipay.gateway,
-        channel: data.channel,
-      });
-      payResult = await provider.createPayment({
-        orderNo,
-        amount,
-        subject: order.subject,
-        notifyUrl: resolveAlipayNotifyUrl(request.headers, paymentConfig.notifyUrl),
-      });
-    } else if (data.channel === 'WECHAT_NATIVE') {
-      const provider = new WechatPayProvider({
-        appId: paymentConfig.appId!,
-        mchId: paymentConfig.mchId!,
-        apiKey: paymentConfig.apiKey || '',
-        serialNo: paymentConfig.serialNo || '',
-        privateKey: paymentConfig.privateKey || '',
-        channel: data.channel,
-      });
-      payResult = await provider.createPayment({
-        orderNo,
-        amount,
-        subject: order.subject,
-        notifyUrl: `${baseUrl}/api/pay/wechat/notify`,
-      });
-    } else {
-      const provider = new UnionPayProvider({
-        merId: paymentConfig.unionpayMchId || '',
-        certPath: paymentConfig.unionpayCert || '',
-        certPass: process.env.UNIONPAY_CERT_PASSWORD || '',
-        gateway: paymentConfig.gateway || process.env.UNIONPAY_GATEWAY || 'https://gateway.95516.com',
-        channel: data.channel,
-      });
-      payResult = await provider.createPayment({
-        orderNo,
-        amount,
-        subject: order.subject,
-        notifyUrl: `${baseUrl}/api/pay/unionpay/notify`,
-      });
-    }
+    const payResult = await resolved.provider.createPayment({
+      orderNo,
+      amount,
+      subject: order.subject,
+      notifyUrl,
+    });
 
     if (payResult.success && payResult.payData) {
       await prisma.order.update({

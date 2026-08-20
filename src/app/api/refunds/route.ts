@@ -4,6 +4,7 @@ import { Prisma, RefundStatus } from '@prisma/client';
 import { withAuth, successResponse, errorResponse } from '@/lib/api-utils';
 import { generateRefundNo } from '@/lib/auth';
 import { recordAuditLog } from '@/lib/audit';
+import { executeChannelRefund } from '@/lib/payment/refund-service';
 import { z } from 'zod';
 
 const refundSchema = z.object({
@@ -40,7 +41,6 @@ export async function POST(request: NextRequest) {
     }
 
     const refundNo = generateRefundNo();
-    const isFullRefund = amount >= maxRefundable;
 
     // 大额退款需要管理员审核（超过1000元）
     const requiresApproval = amount > 1000 && ctx.user.role === 'CASHIER';
@@ -57,24 +57,6 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    // 如果不需要审核，直接处理退款
-    if (!requiresApproval) {
-      // 更新订单状态
-      await prisma.order.update({
-        where: { id: orderId },
-        data: {
-          refundAmount: { increment: amount },
-          status: isFullRefund ? 'REFUNDED' : 'PARTIALLY_REFUNDED',
-        },
-      });
-
-      // TODO: 调用支付渠道退款接口
-      await prisma.refund.update({
-        where: { id: refund.id },
-        data: { status: 'PROCESSING', processedAt: new Date() },
-      });
-    }
-
     await recordAuditLog({
       merchantMemberId: ctx.user.sub,
       action: 'REFUND_CREATE',
@@ -85,7 +67,21 @@ export async function POST(request: NextRequest) {
       result: 'SUCCESS',
     });
 
-    return successResponse(refund, requiresApproval ? '退款申请已提交，等待管理员审核' : '退款已提交处理');
+    // 无需审核：立即执行真实渠道退款。
+    // fail-closed：渠道退款未确认成功前，绝不把订单标记为退款成功。
+    if (!requiresApproval) {
+      const execution = await executeChannelRefund(refund.id);
+      if (!execution.ok) {
+        return errorResponse(`退款处理失败: ${execution.error || '渠道退款未完成'}`, 502);
+      }
+      const updated = await prisma.refund.findUnique({ where: { id: refund.id } });
+      return successResponse(
+        updated ?? refund,
+        execution.refundStatus === 'SUCCESS' ? '退款成功' : '渠道已受理退款，终态确认中'
+      );
+    }
+
+    return successResponse(refund, '退款申请已提交，等待管理员审核');
   }, ['MERCHANT_OWNER', 'MERCHANT_ADMIN', 'FINANCE', 'CASHIER', 'CUSTOMER_SERVICE']);
 }
 

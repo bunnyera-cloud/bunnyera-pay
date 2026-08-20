@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/db';
 import { withAuth, successResponse, errorResponse } from '@/lib/api-utils';
-import { AlipayProvider } from '@/lib/payment/alipay';
-import { resolveAlipayConfig, amountToFen } from '@/lib/payment/config';
+import { resolveProvider } from '@/lib/payment/resolver';
+import { amountToFen } from '@/lib/payment/config';
 import { recordAuditLog } from '@/lib/audit';
 
 // 主动向支付宝查单补偿（不依赖回调）
@@ -37,11 +37,10 @@ export async function POST(
     const paymentConfig = await prisma.paymentConfig.findFirst({
       where: { merchantId: order.merchantId, channel: order.channel, isActive: true },
     });
-    const cfg = resolveAlipayConfig(paymentConfig);
-    if (!cfg.usable) return successResponse({ status: order.status, source: 'LOCAL' });
+    const resolved = resolveProvider(order.channel, paymentConfig);
+    if (!resolved.provider || !resolved.usable) return successResponse({ status: order.status, source: 'LOCAL' });
 
-    const provider = new AlipayProvider({ ...cfg, channel: order.channel });
-    const result = await provider.queryOrder({
+    const result = await resolved.provider.queryOrder({
       orderNo,
       ...(order.channelTradeNo ? { tradeNo: order.channelTradeNo } : {}),
     });

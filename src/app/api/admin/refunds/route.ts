@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import prisma from '@/lib/db';
 import { Prisma, RefundStatus } from '@prisma/client';
 import { withAuth, successResponse, errorResponse, paginatedResponse } from '@/lib/api-utils';
+import { executeChannelRefund } from '@/lib/payment/refund-service';
 
 // 平台管理员获取全部退款（跨商户）
 export async function GET(request: NextRequest) {
@@ -67,6 +68,19 @@ export async function PATCH(request: NextRequest) {
       data: updateData,
     });
 
-    return successResponse(updated, action === 'approve' ? '退款已批准' : '退款已拒绝');
+    // 批准后执行真实渠道退款（fail-closed：渠道失败不标记退款成功）
+    if (action === 'approve') {
+      const execution = await executeChannelRefund(updated.id);
+      if (!execution.ok) {
+        return errorResponse(`退款已批准，但渠道退款处理失败: ${execution.error || '未知错误'}`, 502);
+      }
+      const latest = await prisma.refund.findUnique({ where: { id: refundId } });
+      return successResponse(
+        latest ?? updated,
+        execution.refundStatus === 'SUCCESS' ? '退款已批准并成功' : '退款已批准，渠道受理中，终态确认中'
+      );
+    }
+
+    return successResponse(updated, '退款已拒绝');
   }, ['PLATFORM_SUPER_ADMIN']);
 }

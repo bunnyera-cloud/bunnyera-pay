@@ -3,30 +3,47 @@ import { PaymentChannel } from '@prisma/client';
 // 统一支付接口
 export interface PaymentProvider {
   channel: PaymentChannel;
-  
+
   // 创建支付
   createPayment(params: CreatePaymentParams): Promise<CreatePaymentResult>;
-  
+
   // 查询订单
   queryOrder(params: QueryOrderParams): Promise<OrderQueryResult>;
-  
+
   // 关闭订单
   closeOrder(params: CloseOrderParams): Promise<boolean>;
-  
+
   // 退款
   refund(params: RefundParams): Promise<RefundResult>;
-  
+
   // 查询退款
   queryRefund(params: QueryRefundParams): Promise<RefundQueryResult>;
-  
-  // 验证回调签名
+
+  // 验证回调签名（逐步收敛到 handleWebhook，保留兼容）
   verifyCallback(body: unknown, headers: Record<string, string>): boolean;
-  
-  // 解析回调
+
+  // 解析回调（逐步收敛到 handleWebhook，保留兼容）
   parseCallback(body: unknown): CallbackData;
-  
+
+  // 统一 Webhook 处理：验签 + 凭证一致性校验 + 解密 + 解析。
+  // 验签失败必须返回 verified=false，调用方不得继续处理；禁止兼容性假成功。
+  handleWebhook(payload: WebhookPayload): Promise<WebhookResult>;
+
   // 下载账单
   downloadBill?(date: string): Promise<BillData>;
+}
+
+// Webhook 入参：原始请求体 + 请求头（验签所需的签名信息在 headers 中）
+export interface WebhookPayload {
+  body: unknown;
+  headers: Record<string, string>;
+}
+
+// Webhook 处理结果：verified=false 时 data 必须为空
+export interface WebhookResult {
+  verified: boolean;
+  data?: CallbackData;
+  error?: string;
 }
 
 export interface CreatePaymentParams {

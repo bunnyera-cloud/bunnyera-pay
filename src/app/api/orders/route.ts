@@ -3,11 +3,8 @@ import prisma from '@/lib/db';
 import { Prisma, OrderStatus, PaymentChannel } from '@prisma/client';
 import { withAuth, successResponse, errorResponse } from '@/lib/api-utils';
 import { generateOrderNo } from '@/lib/auth';
-import { AlipayProvider } from '@/lib/payment/alipay';
-import { WechatPayProvider } from '@/lib/payment/wechat';
-import { UnionPayProvider } from '@/lib/payment/unionpay';
+import { resolveProvider } from '@/lib/payment/resolver';
 import {
-  resolveAlipayConfig,
   resolveAlipayNotifyUrl,
   resolvePaymentEnv,
   resolveBaseUrl,
@@ -96,7 +93,6 @@ export async function POST(request: NextRequest) {
     try {
       const paymentEnv = resolvePaymentEnv();
       const baseUrl = resolveBaseUrl(req.headers);
-      const notifyUrl = resolveAlipayNotifyUrl(req.headers, paymentConfig?.notifyUrl);
       const isConfigured = !!(paymentConfig && paymentConfig.isActive);
 
       // PREVIEW：渠道尚未配置或未审核通过时，生成 BunnyEra Pay 自有预览支付链接。
@@ -114,81 +110,36 @@ export async function POST(request: NextRequest) {
           status: updated.status,
           payData: previewPayData,
           paymentEnv: 'PREVIEW',
-          notifyUrl,
+          notifyUrl: resolveAlipayNotifyUrl(req.headers, paymentConfig?.notifyUrl),
           message: missingReason,
         });
       }
 
-      // 根据渠道类型调用不同 Provider
-      let payResult: { success: boolean; payData?: string; tradeNo?: string; error?: string };
-
-      if (data.channel.startsWith('ALIPAY')) {
-        const alipay = resolveAlipayConfig(paymentConfig);
-        if (!alipay.usable) {
-          return errorResponse(`支付宝配置缺失: ${alipay.missing.join(', ')}`, 502);
-        }
-        const provider = new AlipayProvider({
-          appId: alipay.appId,
-          privateKey: alipay.privateKey,
-          publicKey: alipay.publicKey,
-          gateway: alipay.gateway,
-          channel: data.channel,
-        });
-        payResult = await provider.createPayment({
-          orderNo,
-          amount: data.amount,
-          subject: data.subject,
-          notifyUrl,
-          returnUrl: data.returnUrl,
-          clientIp: data.clientIp,
-          extraParams: data.extraParams,
-        });
-      } else if (data.channel.startsWith('WECHAT')) {
-        const wechatUsable = paymentConfig?.appId && paymentConfig?.mchId && paymentConfig?.apiKey && paymentConfig?.serialNo && paymentConfig?.privateKey;
-        if (!wechatUsable) {
-          return errorResponse('微信支付渠道未配置', 502);
-        }
-        const provider = new WechatPayProvider({
-          appId: paymentConfig.appId!,
-          mchId: paymentConfig.mchId!,
-          apiKey: paymentConfig.apiKey || '',
-          serialNo: paymentConfig.serialNo || '',
-          privateKey: paymentConfig.privateKey || '',
-          channel: data.channel,
-        });
-        payResult = await provider.createPayment({
-          orderNo,
-          amount: data.amount,
-          subject: data.subject,
-          notifyUrl: `${baseUrl}/api/pay/wechat/notify`,
-          returnUrl: data.returnUrl,
-          clientIp: data.clientIp,
-          extraParams: data.extraParams,
-        });
-      } else if (data.channel.startsWith('UNIONPAY')) {
-        const unionpayUsable = paymentConfig?.unionpayMchId && paymentConfig?.unionpayCert;
-        if (!unionpayUsable) {
-          return errorResponse('银联支付渠道未配置', 502);
-        }
-        const provider = new UnionPayProvider({
-          merId: paymentConfig.unionpayMchId || '',
-          certPath: paymentConfig.unionpayCert || '',
-          certPass: paymentConfig.certPath || process.env.UNIONPAY_CERT_PASSWORD || '',
-          gateway: paymentConfig.gateway || process.env.UNIONPAY_GATEWAY || 'https://gateway.95516.com',
-          channel: data.channel,
-        });
-        payResult = await provider.createPayment({
-          orderNo,
-          amount: data.amount,
-          subject: data.subject,
-          notifyUrl: `${baseUrl}/api/pay/unionpay/notify`,
-          returnUrl: data.returnUrl,
-          clientIp: data.clientIp,
-          extraParams: data.extraParams,
-        });
-      } else {
+      // 根据渠道类型调用 Provider（实例化统一通过 resolveProvider 收口）
+      if (!data.channel.startsWith('ALIPAY') && !data.channel.startsWith('WECHAT') && !data.channel.startsWith('UNIONPAY')) {
         return errorResponse(`不支持的支付渠道: ${data.channel}`, 400);
       }
+
+      const resolved = resolveProvider(data.channel, paymentConfig);
+      if (!resolved.provider || !resolved.usable) {
+        return errorResponse(`支付渠道不可用: ${resolved.missing.join(', ')}`, 502);
+      }
+
+      const notifyUrl = data.channel.startsWith('ALIPAY')
+        ? resolveAlipayNotifyUrl(req.headers, paymentConfig?.notifyUrl)
+        : data.channel.startsWith('WECHAT')
+          ? `${baseUrl}/api/pay/wechat/notify`
+          : `${baseUrl}/api/pay/unionpay/notify`;
+
+      const payResult = await resolved.provider.createPayment({
+        orderNo,
+        amount: data.amount,
+        subject: data.subject,
+        notifyUrl,
+        returnUrl: data.returnUrl,
+        clientIp: data.clientIp,
+        extraParams: data.extraParams,
+      });
 
       if (payResult.success && payResult.payData) {
         await prisma.order.update({

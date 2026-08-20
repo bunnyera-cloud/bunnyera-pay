@@ -2,10 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/db';
 import { withAuth, successResponse, errorResponse } from '@/lib/api-utils';
 import { generateOrderNo } from '@/lib/auth';
-import { PaymentFactory } from '@/lib/payment/provider';
-import { AlipayProvider } from '@/lib/payment/alipay';
-import { WechatPayProvider } from '@/lib/payment/wechat';
-import { UnionPayProvider } from '@/lib/payment/unionpay';
+import { resolveProvider } from '@/lib/payment/resolver';
+import { resolveAlipayNotifyUrl, resolveBaseUrl } from '@/lib/payment/config';
 import { z } from 'zod';
 
 // 统一聚合支付请求
@@ -55,11 +53,19 @@ export async function POST(request: NextRequest) {
       return errorResponse('商户不可用', 403);
     }
 
-    // 如果指定了渠道，验证渠道配置
+    // 指定渠道：先确认渠道配置可用（fail-closed），再创建订单，绝不创建 demo 订单
     if (data.channel) {
       const paymentConfig = await prisma.paymentConfig.findFirst({
         where: { merchantId, channel: data.channel, isActive: true },
       });
+
+      const resolved = resolveProvider(data.channel, paymentConfig);
+      if (!paymentConfig || !resolved.provider || !resolved.usable) {
+        return errorResponse(
+          `支付渠道不可用: ${resolved.missing.join(', ') || '该渠道尚未配置'}`,
+          400
+        );
+      }
 
       // 生成订单号
       const orderNo = generateOrderNo();
@@ -88,56 +94,16 @@ export async function POST(request: NextRequest) {
         },
       });
 
-      // 演示模式：无支付配置时直接返回
-      if (!paymentConfig) {
-        await prisma.order.update({
-          where: { id: order.id },
-          data: { status: 'PAYING' },
-        });
-
-        return successResponse({
-          orderId: order.id,
-          orderNo: order.orderNo,
-          status: 'PAYING',
-          mode: 'demo',
-          message: '订单已创建（演示模式，未配置支付渠道）',
-        });
-      }
-
-      // 调用支付渠道
+      // 调用真实支付渠道
       try {
-        // 将 null 转换为 undefined 以匹配 getProvider 参数类型
-        const configForProvider = {
-          channel: paymentConfig.channel,
-          appId: paymentConfig.appId || undefined,
-          privateKey: paymentConfig.privateKey || undefined,
-          publicKey: paymentConfig.publicKey || undefined,
-          gateway: paymentConfig.gateway || undefined,
-          mchId: paymentConfig.mchId || undefined,
-          apiKey: paymentConfig.apiKey || undefined,
-          serialNo: paymentConfig.serialNo || undefined,
-          certPath: paymentConfig.certPath || undefined,
-          unionpayMchId: paymentConfig.unionpayMchId || undefined,
-          unionpayCert: paymentConfig.unionpayCert || undefined,
-          notifyUrl: paymentConfig.notifyUrl || undefined,
-        };
-        const provider = getProvider(configForProvider, data.channel);
-        if (!provider) {
-          await prisma.order.update({
-            where: { id: order.id },
-            data: { status: 'PAYING' },
-          });
+        const baseUrl = resolveBaseUrl(req.headers);
+        const notifyUrl = data.channel.startsWith('ALIPAY')
+          ? resolveAlipayNotifyUrl(req.headers, paymentConfig.notifyUrl)
+          : data.channel.startsWith('WECHAT')
+            ? `${baseUrl}/api/pay/wechat/notify`
+            : `${baseUrl}/api/pay/unionpay/notify`;
 
-          return successResponse({
-            orderId: order.id,
-            orderNo: order.orderNo,
-            status: 'CREATED',
-            message: '订单已创建，等待支付渠道配置完成',
-          });
-        }
-
-        const notifyUrl = paymentConfig.notifyUrl || process.env.ALIPAY_NOTIFY_URL || '';
-        const result = await provider.createPayment({
+        const result = await resolved.provider.createPayment({
           orderNo,
           amount: data.amount,
           subject: data.subject,
@@ -160,21 +126,21 @@ export async function POST(request: NextRequest) {
             tradeNo: result.tradeNo,
             channel: data.channel,
           });
-        } else {
-          await prisma.order.update({
-            where: { id: order.id },
-            data: { status: 'FAILED' },
-          });
-
-          return errorResponse(`支付创建失败: ${result.error}`, 502);
         }
+
+        await prisma.order.update({
+          where: { id: order.id },
+          data: { status: 'FAILED' },
+        });
+        return errorResponse(`支付创建失败: ${result.error}`, 502);
       } catch (error) {
-        console.error('Payment creation error:', error);
+        console.error('Payment creation error:', (error as Error).message);
+        await prisma.order.update({ where: { id: order.id }, data: { status: 'FAILED' } });
         return errorResponse('支付渠道调用失败', 502);
       }
     }
 
-    // 未指定渠道：返回可用渠道列表
+    // 未指定渠道：返回商户已配置且可用的渠道列表；无任何配置时返回明确业务错误
     const configs = await prisma.paymentConfig.findMany({
       where: { merchantId, isActive: true },
       select: { channel: true, isSandbox: true },
@@ -186,13 +152,8 @@ export async function POST(request: NextRequest) {
       isSandbox: c.isSandbox,
     }));
 
-    // 如果没有任何配置，返回演示模式提示
     if (availableChannels.length === 0) {
-      return successResponse({
-        mode: 'demo',
-        availableChannels: getAllChannels(),
-        message: '未配置任何支付渠道，以下为全部可用渠道（演示模式）',
-      });
+      return errorResponse('该商户尚未配置任何支付渠道', 400);
     }
 
     return successResponse({
@@ -200,47 +161,6 @@ export async function POST(request: NextRequest) {
       message: `该商户已开通 ${availableChannels.length} 个支付渠道`,
     });
   }, ['MERCHANT_OWNER', 'MERCHANT_ADMIN', 'FINANCE', 'CASHIER']);
-}
-
-// 获取支付提供者实例
-function getProvider(config: { channel: string; appId?: string; privateKey?: string; publicKey?: string; gateway?: string; mchId?: string; apiKey?: string; serialNo?: string; certPath?: string; unionpayMchId?: string; unionpayCert?: string; notifyUrl?: string }, channel: string) {
-  // 先检查工厂注册
-  const registered = PaymentFactory.getProvider(channel as never);
-  if (registered) return registered;
-
-  // 根据渠道类型动态创建
-  if (channel.startsWith('ALIPAY')) {
-    return new AlipayProvider({
-      appId: config.appId || process.env.ALIPAY_APP_ID || '',
-      privateKey: config.privateKey || process.env.ALIPAY_PRIVATE_KEY || '',
-      publicKey: config.publicKey || process.env.ALIPAY_PUBLIC_KEY || '',
-      gateway: config.gateway || process.env.ALIPAY_GATEWAY || '',
-      channel: channel as never,
-    });
-  }
-
-  if (channel.startsWith('WECHAT')) {
-    return new WechatPayProvider({
-      appId: config.appId || process.env.WECHAT_APP_ID || '',
-      mchId: config.mchId || process.env.WECHAT_MCH_ID || '',
-      apiKey: config.apiKey || process.env.WECHAT_API_KEY || '',
-      serialNo: config.serialNo || process.env.WECHAT_SERIAL_NO || '',
-      privateKey: config.privateKey || '',
-      channel: channel as never,
-    });
-  }
-
-  if (channel.startsWith('UNIONPAY')) {
-    return new UnionPayProvider({
-      merId: config.unionpayMchId || config.mchId || process.env.UNIONPAY_MCH_ID || '',
-      certPath: config.unionpayCert || config.certPath || process.env.UNIONPAY_CERT_PATH || '',
-      certPass: process.env.UNIONPAY_CERT_PASSWORD || '',
-      gateway: config.gateway || process.env.UNIONPAY_GATEWAY || 'https://gateway.95516.com',
-      channel: channel as never,
-    });
-  }
-
-  return null;
 }
 
 function getChannelName(channel: string): string {
@@ -258,20 +178,4 @@ function getChannelName(channel: string): string {
     LAKALA_AGGREGATE: '拉卡拉聚合',
   };
   return names[channel] || channel;
-}
-
-function getAllChannels() {
-  return [
-    { channel: 'ALIPAY_BAR', channelName: '支付宝条码' },
-    { channel: 'ALIPAY_PC', channelName: '支付宝PC' },
-    { channel: 'ALIPAY_WAP', channelName: '支付宝WAP' },
-    { channel: 'WECHAT_NATIVE', channelName: '微信Native' },
-    { channel: 'WECHAT_H5', channelName: '微信H5' },
-    { channel: 'WECHAT_JSAPI', channelName: '微信JSAPI' },
-    { channel: 'WECHAT_MINI', channelName: '微信小程序' },
-    { channel: 'UNIONPAY_GATEWAY', channelName: '银联网关' },
-    { channel: 'UNIONPAY_WAP', channelName: '银联WAP' },
-    { channel: 'UNIONPAY_QR', channelName: '银联二维码' },
-    { channel: 'LAKALA_AGGREGATE', channelName: '拉卡拉聚合' },
-  ];
 }

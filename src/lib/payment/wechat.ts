@@ -11,6 +11,8 @@ import {
   QueryRefundParams,
   RefundQueryResult,
   CallbackData,
+  WebhookPayload,
+  WebhookResult,
 } from './provider';
 import { PaymentChannel } from '@prisma/client';
 
@@ -260,7 +262,7 @@ export class WechatPayProvider implements PaymentProvider {
       out_trade_no?: string;
       transaction_id?: string;
     };
-    
+
     // 如果包含加密数据，先解密
     let resource = data.resource;
     if (resource?.ciphertext) {
@@ -281,5 +283,18 @@ export class WechatPayProvider implements PaymentProvider {
       paidAt: resource?.success_time ? new Date(resource.success_time) : undefined,
       raw: body,
     };
+  }
+
+  // 统一 Webhook：V3 验签（fail-closed，平台证书接入前一律拒绝）+ 解密 + 解析。
+  // 验签失败绝不返回 verified=true，禁止兼容性假成功。
+  async handleWebhook(payload: WebhookPayload): Promise<WebhookResult> {
+    if (!this.verifyCallback(payload.body, payload.headers)) {
+      return { verified: false, error: '微信回调验签失败（需微信平台证书，验签未通过前拒绝处理）' };
+    }
+    try {
+      return { verified: true, data: this.parseCallback(payload.body) };
+    } catch (error) {
+      return { verified: false, error: `回调解密/解析失败: ${(error as Error).message}` };
+    }
   }
 }

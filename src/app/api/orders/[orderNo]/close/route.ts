@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/db';
 import { withAuth, successResponse, errorResponse } from '@/lib/api-utils';
-import { AlipayProvider } from '@/lib/payment/alipay';
-import { resolveAlipayConfig } from '@/lib/payment/config';
+import { resolveProvider } from '@/lib/payment/resolver';
 import { recordAuditLog } from '@/lib/audit';
 
 // 关闭订单
@@ -23,10 +22,9 @@ export async function POST(
       const paymentConfig = await prisma.paymentConfig.findFirst({
         where: { merchantId: order.merchantId, channel: order.channel, isActive: true },
       });
-      const cfg = resolveAlipayConfig(paymentConfig);
-      if (cfg.usable) {
-        const provider = new AlipayProvider({ ...cfg, channel: order.channel });
-        await provider.closeOrder({ orderNo });
+      const resolved = resolveProvider(order.channel, paymentConfig);
+      if (resolved.provider && resolved.usable) {
+        await resolved.provider.closeOrder({ orderNo });
       }
     }
 

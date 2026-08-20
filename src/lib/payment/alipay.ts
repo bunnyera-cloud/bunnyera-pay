@@ -11,6 +11,8 @@ import {
   QueryRefundParams,
   RefundQueryResult,
   CallbackData,
+  WebhookPayload,
+  WebhookResult,
 } from './provider';
 import { PaymentChannel } from '@prisma/client';
 import { amountToFen } from './config';
@@ -22,12 +24,14 @@ export class AlipayProvider implements PaymentProvider {
   private privateKey: string;
   private publicKey: string;
   private gateway: string;
+  private sellerId: string;
 
   constructor(config: {
     appId: string;
     privateKey: string;
     publicKey: string;
     gateway: string;
+    sellerId?: string;
     channel: PaymentChannel;
   }) {
     this.channel = config.channel;
@@ -35,6 +39,7 @@ export class AlipayProvider implements PaymentProvider {
     this.privateKey = config.privateKey;
     this.publicKey = config.publicKey;
     this.gateway = config.gateway;
+    this.sellerId = config.sellerId || '';
   }
 
   // 生成签名
@@ -44,7 +49,7 @@ export class AlipayProvider implements PaymentProvider {
       .filter(k => params[k] !== '' && params[k] !== undefined && k !== 'sign')
       .map(k => `${k}=${params[k]}`)
       .join('&');
-    
+
     const sign = crypto.createSign('RSA-SHA256');
     sign.update(signStr, 'utf8');
     return sign.sign(this.privateKey, 'base64');
@@ -57,7 +62,7 @@ export class AlipayProvider implements PaymentProvider {
       .filter(k => params[k] !== '' && params[k] !== undefined && k !== 'sign' && k !== 'sign_type')
       .map(k => `${k}=${params[k]}`)
       .join('&');
-    
+
     const verify = crypto.createVerify('RSA-SHA256');
     verify.update(signStr, 'utf8');
     return verify.verify(this.publicKey, signature, 'base64');
@@ -90,12 +95,12 @@ export class AlipayProvider implements PaymentProvider {
     const queryString = Object.entries(params)
       .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
       .join('&');
-    
+
     const response = await fetch(`${this.gateway}?${queryString}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     });
-    
+
     return response.json();
   }
 
@@ -133,7 +138,7 @@ export class AlipayProvider implements PaymentProvider {
       }
 
       const reqParams = this.buildParams(method, bizContent, { notifyUrl, returnUrl });
-      
+
       // 对于当面付，直接调用 API 获取二维码
       if (this.channel === 'ALIPAY_BAR') {
         const result = await this.sendRequest(reqParams);
@@ -152,7 +157,7 @@ export class AlipayProvider implements PaymentProvider {
       const queryString = Object.entries(reqParams)
         .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
         .join('&');
-      
+
       return {
         success: true,
         payData: `${this.gateway}?${queryString}`,
@@ -272,5 +277,34 @@ export class AlipayProvider implements PaymentProvider {
       paidAt: params.gmt_payment ? new Date(params.gmt_payment) : undefined,
       raw: body,
     };
+  }
+
+  // 统一 Webhook：RSA2 验签 + app_id/seller_id 凭证一致性校验 + 解析。
+  // 任一环节失败即 verified=false，禁止兼容性假成功。
+  async handleWebhook(payload: WebhookPayload): Promise<WebhookResult> {
+    if (typeof payload.body !== 'object' || payload.body === null) {
+      return { verified: false, error: '回调体格式非法' };
+    }
+    const params = payload.body as Record<string, string>;
+
+    if (!this.verifyCallback(payload.body, payload.headers)) {
+      return { verified: false, error: '签名验证失败' };
+    }
+
+    // app_id 必须与服务端配置一致
+    if (!this.appId || params.app_id !== this.appId) {
+      return { verified: false, error: 'app_id 与服务端配置不一致' };
+    }
+
+    // seller_id 校验（可以可靠获得时校验）
+    if (this.sellerId && params.seller_id && params.seller_id !== this.sellerId) {
+      return { verified: false, error: 'seller_id 与服务端配置不一致' };
+    }
+
+    try {
+      return { verified: true, data: this.parseCallback(payload.body) };
+    } catch (error) {
+      return { verified: false, error: `回调解析失败: ${(error as Error).message}` };
+    }
   }
 }
