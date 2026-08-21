@@ -10,9 +10,14 @@ import {
   resolveBaseUrl,
 } from '@/lib/payment/config';
 import { z } from 'zod';
+import Decimal from 'decimal.js';
+import { validateOrderContext } from '@/lib/payment/order-context';
 
 const createOrderSchema = z.object({
-  amount: z.number().positive('金额必须大于 0'),
+  amount: z.number().positive('金额必须大于 0').max(1000000).refine(
+    value => new Decimal(value).decimalPlaces() <= 2,
+    '金额最多保留两位小数'
+  ),
   subject: z.string().min(1).max(200),
   channel: z.enum([
     'ALIPAY_BAR', 'ALIPAY_PC', 'ALIPAY_WAP',
@@ -56,6 +61,9 @@ export async function POST(request: NextRequest) {
     if (!merchant || merchant.status !== 'ACTIVE') {
       return errorResponse('商户不可用', 403);
     }
+
+    const contextError = await validateOrderContext(merchantId, data);
+    if (contextError) return errorResponse(contextError, 400);
 
     // 获取支付配置；无真实可用 Provider 时在创建订单前明确失败
     const paymentConfig = await prisma.paymentConfig.findFirst({

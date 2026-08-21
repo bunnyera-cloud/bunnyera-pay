@@ -16,16 +16,16 @@ export async function POST(request: NextRequest) {
     // 查找商户成员
     const member = await prisma.merchantMember.findFirst({
       where: { email },
-      include: { merchant: true },
+      include: { merchant: true }
     });
 
     if (!member) {
       return NextResponse.json({ error: '邮箱或密码错误' }, { status: 401 });
     }
 
-    // 检查商户状态（拒绝和终止的商户不能登录）
-    if (member.merchant.status === 'REJECTED' || member.merchant.status === 'TERMINATED') {
-      return NextResponse.json({ error: '商户已被拒绝或终止，请联系管理员' }, { status: 403 });
+    // 两个商户登录入口统一只允许 ACTIVE 商户，避免审核中账号绕过主入口。
+    if (member.merchant.status !== 'ACTIVE') {
+      return NextResponse.json({ error: '商户尚未激活或已停用，请联系管理员' }, { status: 403 });
     }
 
     // 检查账户是否被锁定
@@ -47,8 +47,8 @@ export async function POST(request: NextRequest) {
         where: { id: member.id },
         data: {
           loginAttempts: attempts,
-          lockedUntil: attempts >= maxAttempts ? new Date(Date.now() + lockoutMs) : undefined,
-        },
+          lockedUntil: attempts >= maxAttempts ? new Date(Date.now() + lockoutMs) : undefined
+        }
       });
 
       await recordAuditLog({
@@ -58,7 +58,7 @@ export async function POST(request: NextRequest) {
         resourceId: member.id,
         request,
         result: 'FAILED',
-        detail: '密码错误',
+        detail: '密码错误'
       });
 
       return NextResponse.json({ error: '邮箱或密码错误' }, { status: 401 });
@@ -69,7 +69,7 @@ export async function POST(request: NextRequest) {
       sub: member.id,
       type: 'merchant',
       merchantId: member.merchantId,
-      role: member.role,
+      role: member.role
     });
 
     // 创建会话
@@ -79,8 +79,8 @@ export async function POST(request: NextRequest) {
         token,
         device: request.headers.get('user-agent') || 'unknown',
         ip: request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown',
-        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-      },
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
+      }
     });
 
     // 重置登录尝试
@@ -89,8 +89,8 @@ export async function POST(request: NextRequest) {
       data: {
         loginAttempts: 0,
         lockedUntil: null,
-        lastLoginAt: new Date(),
-      },
+        lastLoginAt: new Date()
+      }
     });
 
     await recordAuditLog({
@@ -99,7 +99,7 @@ export async function POST(request: NextRequest) {
       resource: 'merchant_member',
       resourceId: member.id,
       request,
-      result: 'SUCCESS',
+      result: 'SUCCESS'
     });
 
     return NextResponse.json({
@@ -113,9 +113,9 @@ export async function POST(request: NextRequest) {
           role: member.role,
           merchantId: member.merchantId,
           merchantName: member.merchant.companyName,
-          merchantNo: member.merchant.merchantNo,
-        },
-      },
+          merchantNo: member.merchant.merchantNo
+        }
+      }
     });
   } catch (error) {
     console.error('Merchant login error:', error);

@@ -1,9 +1,17 @@
 import { SignJWT, jwtVerify } from 'jose';
+import { randomBytes, randomInt } from 'node:crypto';
 
-const secret = new TextEncoder().encode(process.env.JWT_SECRET || 'dev-secret-change-me');
+function jwtSecret(): Uint8Array {
+  const configured = (process.env.JWT_SECRET || '').trim();
+  if (configured.length >= 32) return new TextEncoder().encode(configured);
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('JWT_SECRET must be configured with at least 32 characters');
+  }
+  return new TextEncoder().encode('development-only-secret-change-me');
+}
 
 export interface JwtPayload {
-  sub: string;           // user/member ID
+  sub: string; // user/member ID
   type: 'platform' | 'merchant';
   merchantId?: string;
   role: string;
@@ -14,12 +22,12 @@ export async function signToken(payload: JwtPayload): Promise<string> {
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
     .setExpirationTime(process.env.JWT_EXPIRES_IN || '24h')
-    .sign(secret);
+    .sign(jwtSecret());
 }
 
 export async function verifyToken(token: string): Promise<JwtPayload | null> {
   try {
-    const { payload } = await jwtVerify(token, secret);
+    const { payload } = await jwtVerify(token, jwtSecret());
     return payload as unknown as JwtPayload;
   } catch {
     return null;
@@ -30,33 +38,37 @@ export function generateOrderNo(): string {
   const now = new Date();
   const date = now.toISOString().slice(0, 10).replace(/-/g, '');
   const time = now.toTimeString().slice(0, 8).replace(/:/g, '');
-  const rand = Math.random().toString(36).substring(2, 8).toUpperCase();
+  const rand = secureCode(10);
   return `BEP${date}${time}${rand}`;
 }
 
 export function generateMerchantNo(): string {
   const now = new Date();
   const date = now.toISOString().slice(0, 10).replace(/-/g, '');
-  const rand = Math.random().toString(36).substring(2, 8).toUpperCase();
+  const rand = secureCode(10);
   return `MEP${date}${rand}`;
 }
 
 export function generateRefundNo(): string {
   const now = new Date();
   const date = now.toISOString().slice(0, 10).replace(/-/g, '');
-  const rand = Math.random().toString(36).substring(2, 8).toUpperCase();
+  const rand = secureCode(10);
   return `REF${date}${rand}`;
 }
 
 export function generateApiAppId(): string {
-  return `app_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 10)}`;
+  return `app_${Date.now().toString(36)}_${randomBytes(8).toString('hex')}`;
 }
 
 export function generateApiAppSecret(): string {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  let result = '';
-  for (let i = 0; i < 48; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  return randomBytes(36).toString('base64url');
+}
+
+function secureCode(length: number): string {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let value = '';
+  for (let index = 0; index < length; index += 1) {
+    value += alphabet[randomInt(0, alphabet.length)];
   }
-  return result;
+  return value;
 }

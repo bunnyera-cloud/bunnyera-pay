@@ -5,10 +5,15 @@ import { generateOrderNo } from '@/lib/auth';
 import { resolveProvider } from '@/lib/payment/resolver';
 import { resolveAlipayNotifyUrl, resolveBaseUrl, resolvePaymentEnv } from '@/lib/payment/config';
 import { z } from 'zod';
+import Decimal from 'decimal.js';
+import { validateOrderContext } from '@/lib/payment/order-context';
 
 // 统一聚合支付请求
 const unifiedPaySchema = z.object({
-  amount: z.number().positive('金额必须大于 0'),
+  amount: z.number().positive('金额必须大于 0').max(1000000).refine(
+    value => new Decimal(value).decimalPlaces() <= 2,
+    '金额最多保留两位小数'
+  ),
   subject: z.string().min(1).max(200),
   // 可选：指定渠道，不指定则返回可用渠道列表
   channel: z.enum([
@@ -52,6 +57,9 @@ export async function POST(request: NextRequest) {
     if (!merchant || merchant.status !== 'ACTIVE') {
       return errorResponse('商户不可用', 403);
     }
+
+    const contextError = await validateOrderContext(merchantId, data);
+    if (contextError) return errorResponse(contextError, 400);
 
     // 指定渠道：先确认渠道配置可用（fail-closed），再创建订单，绝不创建 demo 订单
     if (data.channel) {
