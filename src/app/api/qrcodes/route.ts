@@ -2,6 +2,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/db';
 import { withAuth, successResponse, errorResponse } from '@/lib/api-utils';
 import { z } from 'zod';
+import { Prisma } from '@prisma/client';
+import Decimal from 'decimal.js';
+import { randomInt } from 'node:crypto';
+import { resolveBaseUrl } from '@/lib/payment/config';
 
 const createQRSchema = z.object({
   type: z.enum(['FIXED', 'DYNAMIC']),
@@ -10,7 +14,17 @@ const createQRSchema = z.object({
   storeId: z.string().min(1, '请选择分店'),
   departmentId: z.string().optional(),
   counterId: z.string().optional(),
-  amount: z.number().positive().optional(), // 固定码固定金额
+  amount: z.number().positive().max(1000000).refine(
+    value => new Decimal(value).decimalPlaces() <= 2,
+    '金额最多保留两位小数'
+  ).optional(), // 动态码固定金额
+}).superRefine((data, ctx) => {
+  if (data.type === 'FIXED' && data.amount !== undefined) {
+    ctx.addIssue({ code: 'custom', path: ['amount'], message: '固定入口码由顾客输入金额' });
+  }
+  if (data.type === 'DYNAMIC' && data.amount === undefined) {
+    ctx.addIssue({ code: 'custom', path: ['amount'], message: '动态订单码必须指定金额' });
+  }
 });
 
 // 生成二维码编号
@@ -20,8 +34,8 @@ function generateQRCode(): string {
   const date = now.toISOString().slice(0, 10).replace(/-/g, '');
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let rand = '';
-  for (let i = 0; i < 6; i++) {
-    rand += alphabet[Math.floor(Math.random() * alphabet.length)];
+  for (let i = 0; i < 10; i++) {
+    rand += alphabet[randomInt(0, alphabet.length)];
   }
   return `QR${date}${rand}`;
 }
@@ -50,24 +64,52 @@ export async function POST(request: NextRequest) {
       return errorResponse('该门店已停用，请选择其他分店', 400);
     }
 
-    const code = generateQRCode();
-    const qrCode = await prisma.qRCode.create({
-      data: {
-        merchantId,
-        code,
-        type: data.type,
-        name: data.name,
-        storeId: data.storeId,
-        departmentId: data.departmentId,
-        counterId: data.counterId,
-        amount: data.amount,
-        expiredAt: data.type === 'DYNAMIC' ? new Date(Date.now() + 24 * 60 * 60 * 1000) : null,
-      },
-    });
+    if (data.departmentId) {
+      const department = await prisma.department.findFirst({
+        where: { id: data.departmentId, storeId: store.id, isActive: true },
+      });
+      if (!department) return errorResponse('部门不存在、不属于该门店或已停用', 400);
+    }
+    if (data.counterId) {
+      const counter = await prisma.counter.findFirst({
+        where: {
+          id: data.counterId,
+          isActive: true,
+          department: {
+            storeId: store.id,
+            ...(data.departmentId ? { id: data.departmentId } : {}),
+          },
+        },
+      });
+      if (!counter) return errorResponse('收银台不存在、不属于该门店或已停用', 400);
+    }
 
-    // 生成二维码图片URL（指向收银台页面，与 .env 的 NEXT_PUBLIC_APP_URL 保持一致）
-    const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
-    const payUrl = `${baseUrl}/pay/${code}`;
+    // 数据库唯一约束是最终保证；极低概率碰撞时重新生成，避免返回无意义的 500。
+    let qrCode = null;
+    for (let attempt = 0; attempt < 5 && !qrCode; attempt += 1) {
+      try {
+        qrCode = await prisma.qRCode.create({
+          data: {
+            merchantId,
+            code: generateQRCode(),
+            type: data.type,
+            name: data.name,
+            storeId: data.storeId,
+            departmentId: data.departmentId,
+            counterId: data.counterId,
+            amount: data.type === 'DYNAMIC' ? data.amount : null,
+            expiredAt: data.type === 'DYNAMIC' ? new Date(Date.now() + 24 * 60 * 60 * 1000) : null,
+          },
+        });
+      } catch (error) {
+        if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
+          throw error;
+        }
+      }
+    }
+    if (!qrCode) return errorResponse('收款码编号生成失败，请重试', 503);
+
+    const payUrl = `${resolveBaseUrl(req.headers)}/pay/${qrCode.code}`;
 
     return successResponse({
       ...qrCode,
@@ -107,7 +149,7 @@ export async function GET(request: NextRequest) {
       stores.forEach(s => storeMap.set(s.id, { name: s.name, brand: { name: s.brand.name } }));
     }
 
-    const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+    const baseUrl = resolveBaseUrl(req.headers);
 
     return successResponse(
       qrCodes.map(qr => ({

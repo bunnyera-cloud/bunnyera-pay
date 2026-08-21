@@ -41,6 +41,7 @@ export default function PayPageClient({ qrCode, channels, paymentEnv, paymentEnv
   const [qrImage, setQrImage] = useState('');
   const [payResult, setPayResult] = useState<'idle' | 'paying' | 'success' | 'failed'>('idle');
   const [orderNo, setOrderNo] = useState('');
+  const [statusToken, setStatusToken] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
 
   const hasFixedAmount = !!qrCode.amount;
@@ -48,10 +49,11 @@ export default function PayPageClient({ qrCode, channels, paymentEnv, paymentEnv
 
   // 轮询真实订单状态（以渠道回调落库为准，绝不本地模拟成功）
   useEffect(() => {
-    if (payResult !== 'paying' || !orderNo) return;
+    if (payResult !== 'paying' || !orderNo || !statusToken) return;
     const timer = setInterval(async () => {
       try {
-        const res = await fetch(`/api/pay/cashier?orderNo=${encodeURIComponent(orderNo)}`);
+        const query = new URLSearchParams({ orderNo, statusToken });
+        const res = await fetch(`/api/pay/cashier?${query.toString()}`);
         if (!res.ok) return;
         const json = await res.json();
         const status = json.data?.status;
@@ -70,7 +72,7 @@ export default function PayPageClient({ qrCode, channels, paymentEnv, paymentEnv
       }
     }, 3000);
     return () => clearInterval(timer);
-  }, [payResult, orderNo]);
+  }, [payResult, orderNo, statusToken]);
 
   const handlePay = async (channel: string) => {
     if (!canPay || loading) return;
@@ -97,6 +99,7 @@ export default function PayPageClient({ qrCode, channels, paymentEnv, paymentEnv
       }
 
       setOrderNo(json.data.orderNo);
+      setStatusToken(json.data.statusToken);
       const payData = json.data.payData as string;
       if (payData) {
         const qr = await QRCode.toDataURL(payData, {
@@ -118,6 +121,7 @@ export default function PayPageClient({ qrCode, channels, paymentEnv, paymentEnv
     setPayResult('idle');
     setQrImage('');
     setOrderNo('');
+    setStatusToken('');
     setErrorMsg('');
     setSelectedChannel(null);
   };

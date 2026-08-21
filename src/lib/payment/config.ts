@@ -1,4 +1,6 @@
 import type { PaymentConfig } from '@prisma/client';
+import { readFileSync } from 'node:fs';
+import { decryptPaymentSecret } from './secret-storage';
 
 // BunnyEra Pay 支付环境
 export type PaymentEnv = 'PRODUCTION' | 'SANDBOX' | 'PREVIEW';
@@ -26,8 +28,12 @@ export function resolvePaymentEnv(): PaymentEnv {
  */
 export function resolveBaseUrl(headers?: Headers): string {
   const configured = (process.env.APP_BASE_URL || '').trim();
-  if (configured && configured !== 'null' && configured !== 'undefined') {
+  if (/^https?:\/\//i.test(configured) && configured !== 'null' && configured !== 'undefined') {
     return configured.replace(/\/+$/, '');
+  }
+  // 生产环境不信任可被客户端伪造的 Host / X-Forwarded-Host。
+  if (resolvePaymentEnv() === 'PRODUCTION') {
+    return 'https://pay.bunnyera.com';
   }
   if (headers) {
     const host = headers.get('x-forwarded-host') || headers.get('host');
@@ -40,7 +46,8 @@ export function resolveBaseUrl(headers?: Headers): string {
 /** 支付宝异步通知地址，必须为 HTTPS 绝对地址 */
 export function resolveAlipayNotifyUrl(headers?: Headers, configured?: string | null): string {
   const fromConfig = (configured || process.env.ALIPAY_NOTIFY_URL || '').trim();
-  if (fromConfig && /^https?:\/\//i.test(fromConfig) && !fromConfig.includes('null')) {
+  const allowedProtocol = resolvePaymentEnv() === 'PRODUCTION' ? /^https:\/\//i : /^https?:\/\//i;
+  if (fromConfig && allowedProtocol.test(fromConfig) && !fromConfig.includes('null')) {
     return fromConfig;
   }
   return `${resolveBaseUrl(headers)}/api/pay/alipay/notify`;
@@ -52,6 +59,8 @@ export interface ResolvedAlipayConfig {
   publicKey: string;
   gateway: string;
   sellerId: string;
+  appCertSn: string;
+  alipayRootCertSn: string;
   env: PaymentEnv;
   /** 是否具备真实调用支付宝 API 的完整配置 */
   usable: boolean;
@@ -61,10 +70,18 @@ export interface ResolvedAlipayConfig {
 /** 合并商户渠道配置与服务端环境变量（私钥只在服务端出现） */
 export function resolveAlipayConfig(paymentConfig?: PaymentConfig | null): ResolvedAlipayConfig {
   const env = resolvePaymentEnv();
+  const extra = asStringRecord(paymentConfig?.extraConfig);
   const appId = (paymentConfig?.appId || process.env.ALIPAY_APP_ID || '').trim();
-  const privateKey = normalizeKey(paymentConfig?.privateKey || process.env.ALIPAY_PRIVATE_KEY || '');
-  const publicKey = normalizeKey(
-    paymentConfig?.publicKey || process.env.ALIPAY_PLATFORM_PUBLIC_KEY || process.env.ALIPAY_PUBLIC_KEY || ''
+  const privateKey = normalizePrivateKey(
+    decryptPaymentSecret(paymentConfig?.privateKey) || process.env.ALIPAY_PRIVATE_KEY || ''
+  );
+  const publicKey = normalizePublicKey(
+    paymentConfig?.publicKey ||
+      extra.platformCertificate ||
+      process.env.ALIPAY_PLATFORM_CERTIFICATE ||
+      process.env.ALIPAY_PLATFORM_PUBLIC_KEY ||
+      process.env.ALIPAY_PUBLIC_KEY ||
+      ''
   );
   const gateway =
     (paymentConfig?.gateway || process.env.ALIPAY_GATEWAY || '').trim() ||
@@ -72,8 +89,14 @@ export function resolveAlipayConfig(paymentConfig?: PaymentConfig | null): Resol
 
   // sellerId 优先从 extraConfig 读取，其次环境变量
   const sellerId = (
-    (paymentConfig?.extraConfig as Record<string, string> | null)?.sellerId ||
+    extra.sellerId ||
     process.env.ALIPAY_SELLER_ID ||
+    ''
+  ).trim();
+  const appCertSn = (extra.appCertSn || process.env.ALIPAY_APP_CERT_SN || '').trim();
+  const alipayRootCertSn = (
+    extra.alipayRootCertSn ||
+    process.env.ALIPAY_ROOT_CERT_SN ||
     ''
   ).trim();
 
@@ -81,6 +104,9 @@ export function resolveAlipayConfig(paymentConfig?: PaymentConfig | null): Resol
   if (!appId) missing.push('ALIPAY_APP_ID');
   if (!privateKey) missing.push('ALIPAY_PRIVATE_KEY');
   if (!publicKey) missing.push('ALIPAY_PLATFORM_PUBLIC_KEY');
+  if (env === 'PRODUCTION' && paymentConfig?.isSandbox) {
+    missing.push('PAYMENT_CONFIG_IS_SANDBOX');
+  }
 
   // 生产环境禁止使用沙箱网关
   const gatewayOk = env !== 'PRODUCTION' || !gateway.includes('alipaydev.com');
@@ -92,7 +118,84 @@ export function resolveAlipayConfig(paymentConfig?: PaymentConfig | null): Resol
     publicKey,
     gateway,
     sellerId,
+    appCertSn,
+    alipayRootCertSn,
     env,
+    usable: missing.length === 0,
+    missing,
+  };
+}
+
+export interface ResolvedWechatConfig {
+  appId: string;
+  mchId: string;
+  apiV3Key: string;
+  merchantSerialNo: string;
+  merchantPrivateKey: string;
+  platformPublicKey: string;
+  platformSerialNo: string;
+  usable: boolean;
+  missing: string[];
+}
+
+/**
+ * 合并微信支付商户配置与服务端环境变量。支持 PEM 内容或只读证书文件路径；
+ * 文件读取失败只表现为配置缺失，不回显路径或密钥内容。
+ */
+export function resolveWechatConfig(paymentConfig?: PaymentConfig | null): ResolvedWechatConfig {
+  const extra = asStringRecord(paymentConfig?.extraConfig);
+  const appId = (paymentConfig?.appId || process.env.WECHAT_APP_ID || '').trim();
+  const mchId = (paymentConfig?.mchId || process.env.WECHAT_MCH_ID || '').trim();
+  const apiV3Key = (
+    decryptPaymentSecret(paymentConfig?.apiKey) ||
+    process.env.WECHAT_API_V3_KEY ||
+    process.env.WECHAT_API_KEY ||
+    ''
+  ).trim();
+  const merchantSerialNo = (paymentConfig?.serialNo || process.env.WECHAT_SERIAL_NO || '').trim();
+  const merchantPrivateKey = normalizePrivateKey(
+    decryptPaymentSecret(paymentConfig?.privateKey) ||
+      readSecretFile(paymentConfig?.keyPath) ||
+      process.env.WECHAT_PRIVATE_KEY ||
+      readSecretFile(process.env.WECHAT_KEY_PATH)
+  );
+  const platformPublicKey = normalizePublicKey(
+    extra.platformPublicKey ||
+      paymentConfig?.publicKey ||
+      readSecretFile(extra.platformCertPath) ||
+      process.env.WECHAT_PLATFORM_PUBLIC_KEY ||
+      readSecretFile(process.env.WECHAT_PLATFORM_CERT_PATH)
+  );
+  const platformSerialNo = (
+    extra.platformSerialNo ||
+    process.env.WECHAT_PLATFORM_SERIAL_NO ||
+    ''
+  ).trim();
+
+  const missing: string[] = [];
+  if (!appId) missing.push('WECHAT_APP_ID');
+  if (!mchId) missing.push('WECHAT_MCH_ID');
+  if (!apiV3Key) {
+    missing.push('WECHAT_API_V3_KEY');
+  } else if (Buffer.byteLength(apiV3Key, 'utf8') !== 32) {
+    missing.push('WECHAT_API_V3_KEY(必须为32字节)');
+  }
+  if (!merchantSerialNo) missing.push('WECHAT_MERCHANT_SERIAL_NO');
+  if (!merchantPrivateKey) missing.push('WECHAT_MERCHANT_PRIVATE_KEY');
+  if (!platformPublicKey) missing.push('WECHAT_PLATFORM_PUBLIC_KEY_OR_CERT');
+  if (!platformSerialNo) missing.push('WECHAT_PLATFORM_SERIAL_NO');
+  if (resolvePaymentEnv() === 'PRODUCTION' && paymentConfig?.isSandbox) {
+    missing.push('PAYMENT_CONFIG_IS_SANDBOX');
+  }
+
+  return {
+    appId,
+    mchId,
+    apiV3Key,
+    merchantSerialNo,
+    merchantPrivateKey,
+    platformPublicKey,
+    platformSerialNo,
     usable: missing.length === 0,
     missing,
   };
@@ -125,12 +228,49 @@ export function amountToFen(decimalStr: string): number {
   const fracPadded = (fracTrimmed + '00').slice(0, 2);
 
   const fen = parseInt(intPart + fracPadded, 10);
+  if (!Number.isSafeInteger(fen)) {
+    throw new Error(`Amount exceeds safe integer range: ${decimalStr}`);
+  }
   return negative ? -fen : fen;
 }
 
 /** PEM 规范化：支持环境变量中使用 \n 或裸 base64 */
-function normalizeKey(raw: string): string {
+export function normalizePrivateKey(raw: string): string {
   const key = (raw || '').trim();
   if (!key) return '';
-  return key.includes('\\n') ? key.replace(/\\n/g, '\n') : key;
+  const normalized = key.includes('\\n') ? key.replace(/\\n/g, '\n') : key;
+  if (normalized.includes('-----BEGIN ')) return normalized;
+  return wrapPem('PRIVATE KEY', normalized);
+}
+
+export function normalizePublicKey(raw: string): string {
+  const key = (raw || '').trim();
+  if (!key) return '';
+  const normalized = key.includes('\\n') ? key.replace(/\\n/g, '\n') : key;
+  if (normalized.includes('-----BEGIN ')) return normalized;
+  return wrapPem('PUBLIC KEY', normalized);
+}
+
+function wrapPem(label: string, value: string): string {
+  const compact = value.replace(/\s+/g, '');
+  const lines = compact.match(/.{1,64}/g)?.join('\n') || compact;
+  return `-----BEGIN ${label}-----\n${lines}\n-----END ${label}-----`;
+}
+
+function readSecretFile(filePath?: string | null): string {
+  const value = (filePath || '').trim();
+  if (!value) return '';
+  try {
+    return readFileSync(value, 'utf8');
+  } catch {
+    return '';
+  }
+}
+
+function asStringRecord(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter((entry): entry is [string, string] => typeof entry[1] === 'string')
+  );
 }

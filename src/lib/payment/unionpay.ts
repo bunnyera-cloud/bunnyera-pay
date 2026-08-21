@@ -166,7 +166,7 @@ export class UnionPayProvider implements PaymentProvider {
     return {
       orderNo: data.orderNo || '',
       tradeNo: data.txnId || '',
-      amount: data.txnAmt ? parseInt(data.txnAmt) / 100 : 0,
+      amount: data.txnAmt ? parseInt(data.txnAmt, 10) : 0,
       currency: data.currency || 'CNY',
       status: data.respCode === '00' ? 'SUCCESS' : 'FAILED',
       paidAt: data.txnTime ? new Date(data.txnTime) : undefined,

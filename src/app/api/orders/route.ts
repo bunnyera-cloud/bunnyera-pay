@@ -53,14 +53,25 @@ export async function POST(request: NextRequest) {
 
     // 验证商户状态（拒绝和终止的商户不能下单）
     const merchant = await prisma.merchant.findUnique({ where: { id: merchantId } });
-    if (!merchant || merchant.status === 'REJECTED' || merchant.status === 'TERMINATED') {
+    if (!merchant || merchant.status !== 'ACTIVE') {
       return errorResponse('商户不可用', 403);
     }
 
-    // 获取支付配置（可选，演示模式下可跳过）
+    // 获取支付配置；无真实可用 Provider 时在创建订单前明确失败
     const paymentConfig = await prisma.paymentConfig.findFirst({
       where: { merchantId, channel: data.channel, isActive: true },
     });
+    if (!paymentConfig) {
+      return errorResponse('该支付渠道尚未配置或未启用', 400);
+    }
+    if (!data.channel.startsWith('ALIPAY') && !data.channel.startsWith('WECHAT') && !data.channel.startsWith('UNIONPAY')) {
+      return errorResponse(`不支持的支付渠道: ${data.channel}`, 400);
+    }
+    const resolved = resolveProvider(data.channel, paymentConfig);
+    if (!resolved.provider || !resolved.usable) {
+      return errorResponse(`支付渠道不可用: ${resolved.missing.join(', ')}`, 400);
+    }
+    const paymentEnv = resolvePaymentEnv();
 
     // 生成订单号
     const orderNo = generateOrderNo();
@@ -91,42 +102,30 @@ export async function POST(request: NextRequest) {
 
     // 调用支付渠道创建支付
     try {
-      const paymentEnv = resolvePaymentEnv();
       const baseUrl = resolveBaseUrl(req.headers);
-      const isConfigured = !!(paymentConfig && paymentConfig.isActive);
 
-      // PREVIEW：渠道尚未配置或未审核通过时，生成 BunnyEra Pay 自有预览支付链接。
-      if (!isConfigured || paymentEnv === 'PREVIEW') {
+      // PREVIEW 只预览已完整配置渠道，不再以“缺配置”回退成演示支付。
+      if (paymentEnv === 'PREVIEW') {
         const previewPayData = `${baseUrl}/preview/pay/${orderNo}`;
         const updated = await prisma.order.update({
           where: { id: order.id },
           data: { status: 'PAYING', payData: previewPayData, paymentEnv: 'PREVIEW' },
         });
 
-        const missingReason = !isConfigured ? '渠道未配置' : '演示预览模式';
         return successResponse({
           orderId: updated.id,
           orderNo: updated.orderNo,
           status: updated.status,
           payData: previewPayData,
           paymentEnv: 'PREVIEW',
-          notifyUrl: resolveAlipayNotifyUrl(req.headers, paymentConfig?.notifyUrl),
-          message: missingReason,
+          notifyUrl: resolveAlipayNotifyUrl(req.headers, paymentConfig.notifyUrl),
+          message: '演示预览模式',
         });
       }
 
       // 根据渠道类型调用 Provider（实例化统一通过 resolveProvider 收口）
-      if (!data.channel.startsWith('ALIPAY') && !data.channel.startsWith('WECHAT') && !data.channel.startsWith('UNIONPAY')) {
-        return errorResponse(`不支持的支付渠道: ${data.channel}`, 400);
-      }
-
-      const resolved = resolveProvider(data.channel, paymentConfig);
-      if (!resolved.provider || !resolved.usable) {
-        return errorResponse(`支付渠道不可用: ${resolved.missing.join(', ')}`, 502);
-      }
-
       const notifyUrl = data.channel.startsWith('ALIPAY')
-        ? resolveAlipayNotifyUrl(req.headers, paymentConfig?.notifyUrl)
+        ? resolveAlipayNotifyUrl(req.headers, paymentConfig.notifyUrl)
         : data.channel.startsWith('WECHAT')
           ? `${baseUrl}/api/pay/wechat/notify`
           : `${baseUrl}/api/pay/unionpay/notify`;

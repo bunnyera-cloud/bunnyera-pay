@@ -4,6 +4,7 @@ import { Prisma } from '@prisma/client';
 import { recordAuditLog } from '@/lib/audit';
 import { resolveProvider } from '@/lib/payment/resolver';
 import { amountToFen } from '@/lib/payment/config';
+import { sanitizePaymentPayload } from '@/lib/payment/sanitize';
 
 // 支付宝回调通知处理
 // 统一 Webhook contract：读取请求 -> resolve provider -> provider.handleWebhook() -> 幂等更新
@@ -15,6 +16,7 @@ export async function POST(request: NextRequest) {
     formData.forEach((value, key) => {
       body[key] = value as string;
     });
+    const sanitizedBody = sanitizePaymentPayload(body) as Prisma.InputJsonValue;
 
     // 记录原始回调
     const orderNo = body.out_trade_no;
@@ -46,8 +48,8 @@ export async function POST(request: NextRequest) {
       data: {
         orderId: order.id,
         channel: order.channel,
-        rawData: body as unknown as Prisma.InputJsonValue,
-        signature: body.sign,
+        rawData: sanitizedBody,
+        signature: body.sign ? '[PRESENT]' : null,
         verified: false,
         processed: false,
       },
@@ -118,49 +120,38 @@ export async function POST(request: NextRequest) {
       return new NextResponse('fail', { status: 200 });
     }
 
-    // 更新订单状态（使用事务保证原子性，并发安全）
-    await prisma.$transaction(async (tx) => {
-      // 再次检查订单状态（防止并发回调）
-      const currentOrder = await tx.order.findUnique({
-        where: { id: order.id },
-        select: { status: true },
+    // 非支付成功通知只做审计并确认接收，不得把订单误标为 FAILED。
+    if (callbackData.status !== 'SUCCESS') {
+      await prisma.callbackLog.update({
+        where: { id: callbackLog.id },
+        data: { processed: true, error: `非支付成功状态: ${tradeStatus}` },
       });
+      return new NextResponse('success', { status: 200 });
+    }
 
-      if (currentOrder?.status !== 'CREATED' && currentOrder?.status !== 'PAYING') {
-        return; // 已被其他回调处理
-      }
-
-      if (callbackData.status === 'SUCCESS') {
-        await tx.order.update({
-          where: { id: order.id },
-          data: {
-            status: 'PAID',
-            channelTradeNo: callbackData.tradeNo,
-            paidAt: callbackData.paidAt || new Date(),
-            callbackRaw: body as unknown as Prisma.InputJsonValue,
-            callbackCount: { increment: 1 },
-          },
-        });
-      } else {
-        await tx.order.update({
-          where: { id: order.id },
-          data: {
-            status: 'FAILED',
-            callbackRaw: body as unknown as Prisma.InputJsonValue,
-            callbackCount: { increment: 1 },
-          },
-        });
-      }
+    // 更新订单状态：条件更新是并发执行权锁，只有一个重复回调能创建支付记录。
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.order.updateMany({
+        where: { id: order.id, status: { in: ['CREATED', 'PAYING'] } },
+        data: {
+          status: 'PAID',
+          channelTradeNo: callbackData.tradeNo,
+          paidAt: callbackData.paidAt || new Date(),
+          callbackRaw: sanitizedBody,
+          callbackCount: { increment: 1 },
+        },
+      });
+      if (claimed.count === 0) return;
 
       // 记录支付记录
       await tx.paymentRecord.create({
         data: {
           orderId: order.id,
-          amount: body.total_amount,
+          amount: (callbackData.amount / 100).toFixed(2),
           channel: order.channel,
           channelTradeNo: callbackData.tradeNo,
-          status: callbackData.status,
-          rawData: body as unknown as Prisma.InputJsonValue,
+          status: 'SUCCESS',
+          rawData: sanitizedBody,
         },
       });
     });

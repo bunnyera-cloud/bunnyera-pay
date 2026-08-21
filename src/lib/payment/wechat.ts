@@ -13,32 +13,40 @@ import {
   CallbackData,
   WebhookPayload,
   WebhookResult,
+  RefundWebhookResult,
 } from './provider';
 import { PaymentChannel } from '@prisma/client';
+import { amountToFen } from './config';
 
 // 微信支付提供商（支持 Native、H5、JSAPI、小程序）
 export class WechatPayProvider implements PaymentProvider {
   channel: PaymentChannel;
   private appId: string;
   private mchId: string;
-  private apiKey: string;
-  private serialNo: string;
-  private privateKey: string;
+  private apiV3Key: string;
+  private merchantSerialNo: string;
+  private merchantPrivateKey: string;
+  private platformPublicKey: string;
+  private platformSerialNo: string;
 
   constructor(config: {
     appId: string;
     mchId: string;
-    apiKey: string;
-    serialNo: string;
-    privateKey: string;
+    apiV3Key: string;
+    merchantSerialNo: string;
+    merchantPrivateKey: string;
+    platformPublicKey: string;
+    platformSerialNo: string;
     channel: PaymentChannel;
   }) {
     this.channel = config.channel;
     this.appId = config.appId;
     this.mchId = config.mchId;
-    this.apiKey = config.apiKey;
-    this.serialNo = config.serialNo;
-    this.privateKey = config.privateKey;
+    this.apiV3Key = config.apiV3Key;
+    this.merchantSerialNo = config.merchantSerialNo;
+    this.merchantPrivateKey = config.merchantPrivateKey;
+    this.platformPublicKey = config.platformPublicKey;
+    this.platformSerialNo = config.platformSerialNo;
   }
 
   // 微信支付 V3 签名
@@ -46,7 +54,7 @@ export class WechatPayProvider implements PaymentProvider {
     const message = `${method}\n${url}\n${timestamp}\n${nonceStr}\n${body}\n`;
     const sign = crypto.createSign('RSA-SHA256');
     sign.update(message);
-    return sign.sign(this.privateKey, 'base64');
+    return sign.sign(this.merchantPrivateKey, 'base64');
   }
 
   // 生成 Authorization 头
@@ -54,10 +62,34 @@ export class WechatPayProvider implements PaymentProvider {
     const timestamp = Math.floor(Date.now() / 1000).toString();
     const nonceStr = crypto.randomBytes(16).toString('hex');
     const signature = this.signRequest(method, url, timestamp, nonceStr, body);
-    return `WECHATPAY2-SHA256-RSA2048 mchid="${this.mchId}",nonce_str="${nonceStr}",signature="${signature}",timestamp="${timestamp}",serial_no="${this.serialNo}"`;
+    return `WECHATPAY2-SHA256-RSA2048 mchid="${this.mchId}",nonce_str="${nonceStr}",signature="${signature}",timestamp="${timestamp}",serial_no="${this.merchantSerialNo}"`;
   }
 
-  // V3 API 请求
+  // 微信平台签名校验：API 响应与回调共用，缺头/证书/序列号一律拒绝
+  private verifyPlatformSignature(rawBody: string, headers: Record<string, string>): boolean {
+    try {
+      const timestamp = headers['wechatpay-timestamp'];
+      const nonce = headers['wechatpay-nonce'];
+      const signature = headers['wechatpay-signature'];
+      const serial = headers['wechatpay-serial'];
+      if (!timestamp || !nonce || !signature || !serial) return false;
+      if (!this.platformPublicKey || serial !== this.platformSerialNo) return false;
+
+      const timestampSeconds = Number(timestamp);
+      if (!Number.isInteger(timestampSeconds)) return false;
+      if (Math.abs(Math.floor(Date.now() / 1000) - timestampSeconds) > 300) return false;
+
+      const message = `${timestamp}\n${nonce}\n${rawBody}\n`;
+      const verifier = crypto.createVerify('RSA-SHA256');
+      verifier.update(message, 'utf8');
+      verifier.end();
+      return verifier.verify(this.platformPublicKey, signature, 'base64');
+    } catch {
+      return false;
+    }
+  }
+
+  // V3 API 请求：先验证微信平台响应签名，再解析或信任响应内容
   private async apiRequest(method: string, path: string, body?: Record<string, unknown>): Promise<Record<string, unknown>> {
     const url = `https://api.mch.weixin.qq.com${path}`;
     const bodyStr = body ? JSON.stringify(body) : '';
@@ -73,18 +105,34 @@ export class WechatPayProvider implements PaymentProvider {
       body: method !== 'GET' ? bodyStr : undefined,
     });
 
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.message || `微信支付请求失败: ${response.status}`);
+    const rawBody = await response.text();
+    const responseHeaders: Record<string, string> = {};
+    response.headers.forEach((value, key) => {
+      responseHeaders[key.toLowerCase()] = value;
+    });
+    if (!this.verifyPlatformSignature(rawBody, responseHeaders)) {
+      throw new Error('微信支付响应验签失败');
     }
 
-    if (response.status === 204) return {};
-    return response.json();
+    let parsed: Record<string, unknown> = {};
+    if (rawBody) {
+      try {
+        parsed = JSON.parse(rawBody) as Record<string, unknown>;
+      } catch {
+        throw new Error('微信支付响应格式错误');
+      }
+    }
+    if (!response.ok) {
+      const message = typeof parsed.message === 'string' ? parsed.message : '';
+      throw new Error(message || `微信支付请求失败: ${response.status}`);
+    }
+    return parsed;
   }
 
   // 解密回调通知
   private decryptNotify(ciphertext: string, nonce: string, associatedData: string): string {
-    const key = crypto.createHash('sha256').update(this.apiKey).digest();
+    const key = Buffer.from(this.apiV3Key, 'utf8');
+    if (key.length !== 32) throw new Error('APIv3 Key 必须为32字节');
     const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(nonce));
     decipher.setAAD(Buffer.from(associatedData));
     const ciphertextBuf = Buffer.from(ciphertext, 'base64');
@@ -97,6 +145,8 @@ export class WechatPayProvider implements PaymentProvider {
   async createPayment(params: CreatePaymentParams): Promise<CreatePaymentResult> {
     try {
       let path: string;
+      const total = amountToFen(params.amount.toString());
+      if (total <= 0) throw new Error('支付金额必须大于0');
       const body: Record<string, unknown> = {
         appid: this.appId,
         mchid: this.mchId,
@@ -104,7 +154,7 @@ export class WechatPayProvider implements PaymentProvider {
         out_trade_no: params.orderNo,
         notify_url: params.notifyUrl,
         amount: {
-          total: Math.round(params.amount * 100), // 分
+          total,
           currency: params.currency || 'CNY',
         },
       };
@@ -114,19 +164,22 @@ export class WechatPayProvider implements PaymentProvider {
           path = '/v3/pay/transactions/native';
           break;
         case 'WECHAT_H5':
+          if (!params.clientIp) throw new Error('微信 H5 支付缺少 payer_client_ip');
           path = '/v3/pay/transactions/h5';
           body.scene_info = {
-            payer_client_ip: params.clientIp || '127.0.0.1',
+            payer_client_ip: params.clientIp,
             h5_info: { type: 'Wap' },
           };
           break;
         case 'WECHAT_JSAPI':
+          if (!params.extraParams?.openid) throw new Error('微信 JSAPI 支付缺少 openid');
           path = '/v3/pay/transactions/jsapi';
-          body.payer = { openid: params.extraParams?.openid || '' };
+          body.payer = { openid: params.extraParams.openid };
           break;
         case 'WECHAT_MINI':
+          if (!params.extraParams?.openid) throw new Error('微信小程序支付缺少 openid');
           path = '/v3/pay/transactions/jsapi';
-          body.payer = { openid: params.extraParams?.openid || '' };
+          body.payer = { openid: params.extraParams.openid };
           break;
         default:
           throw new Error(`Unsupported channel: ${this.channel}`);
@@ -140,8 +193,8 @@ export class WechatPayProvider implements PaymentProvider {
       if (this.channel === 'WECHAT_H5') {
         return { success: true, payData: result.h5_url };
       }
-      // JSAPI/小程序返回 prepay_id
-      return { success: true, payData: result.prepay_id };
+      if (!result.prepay_id) throw new Error('微信支付未返回 prepay_id');
+      return { success: true, payData: this.buildJsapiPayData(result.prepay_id) };
     } catch (error) {
       return { success: false, error: (error as Error).message };
     }
@@ -169,7 +222,7 @@ export class WechatPayProvider implements PaymentProvider {
 
       return {
         status: statusMap[result.trade_state || ''] || 'UNKNOWN',
-        amount: result.amount?.total ? result.amount.total / 100 : undefined,
+        amount: result.amount?.total,
         tradeNo: result.transaction_id,
         paidAt: result.success_time ? new Date(result.success_time) : undefined,
       };
@@ -191,13 +244,15 @@ export class WechatPayProvider implements PaymentProvider {
 
   async refund(params: RefundParams): Promise<RefundResult> {
     try {
+      const refundAmount = amountToFen(params.refundAmount.toString());
+      const totalAmount = amountToFen(params.totalAmount.toString());
       const body: Record<string, unknown> = {
         out_trade_no: params.orderNo,
         out_refund_no: params.refundNo,
         reason: params.reason || '商户退款',
         amount: {
-          refund: Math.round(params.refundAmount * 100),
-          total: Math.round(params.totalAmount * 100),
+          refund: refundAmount,
+          total: totalAmount,
           currency: 'CNY',
         },
       };
@@ -226,7 +281,7 @@ export class WechatPayProvider implements PaymentProvider {
       };
       return {
         status: statusMap[result.status || ''] || 'UNKNOWN',
-        refundAmount: result.amount?.refund ? result.amount.refund / 100 : undefined,
+        refundAmount: result.amount?.refund,
       };
     } catch {
       return { status: 'UNKNOWN' };
@@ -234,53 +289,20 @@ export class WechatPayProvider implements PaymentProvider {
   }
 
   verifyCallback(body: unknown, headers: Record<string, string>): boolean {
-    // 微信支付 V3 回调验签 - 安全修复：没有生产配置时fail closed
-    const timestamp = headers['wechatpay-timestamp'];
-    const nonce = headers['wechatpay-nonce'];
-    const signature = headers['wechatpay-signature'];
-    if (!timestamp || !nonce || !signature) return false;
-
-    // 安全检查：如果缺少必要生产配置，直接拒绝
-    if (!this.apiKey || !this.serialNo || !this.privateKey || this.apiKey === 'TODO') {
-      console.warn('[WeChatPay] Missing production configuration for callback verification');
-      return false;
-    }
-
     const bodyStr = typeof body === 'string' ? body : JSON.stringify(body);
-    const message = `${timestamp}\n${nonce}\n${bodyStr}\n`;
-
-    // 使用微信平台证书验签（实际需要从证书管理中获取）
-    // 注意：生产环境需要实现完整的证书管理和验签逻辑
-    // 当前版本在没有真实证书的情况下安全地返回false
-    console.warn('[WeChatPay] Callback verification requires WeChatPay public key certificate (not implemented)');
-    return false;
+    return this.verifyPlatformSignature(bodyStr, normalizeHeaders(headers));
   }
 
   parseCallback(body: unknown): CallbackData {
-    const data = body as {
-      resource?: { ciphertext?: string; nonce?: string; associated_data?: string; out_trade_no?: string; transaction_id?: string; trade_state?: string; amount?: { total?: number; currency?: string }; success_time?: string };
-      out_trade_no?: string;
-      transaction_id?: string;
-    };
-
-    // 如果包含加密数据，先解密
-    let resource = data.resource;
-    if (resource?.ciphertext) {
-      const decrypted = this.decryptNotify(
-        resource.ciphertext,
-        resource.nonce || '',
-        resource.associated_data || ''
-      );
-      resource = JSON.parse(decrypted);
-    }
+    const resource = this.parseNotifyResource(body);
 
     return {
-      orderNo: resource?.out_trade_no || data.out_trade_no || '',
-      tradeNo: resource?.transaction_id || data.transaction_id || '',
-      amount: (resource?.amount?.total || 0) / 100,
-      currency: resource?.amount?.currency || 'CNY',
-      status: resource?.trade_state === 'SUCCESS' ? 'SUCCESS' : 'FAILED',
-      paidAt: resource?.success_time ? new Date(resource.success_time) : undefined,
+      orderNo: resource.out_trade_no || '',
+      tradeNo: resource.transaction_id || '',
+      amount: resource.amount?.total || 0,
+      currency: resource.amount?.currency || 'CNY',
+      status: resource.trade_state === 'SUCCESS' ? 'SUCCESS' : 'FAILED',
+      paidAt: resource.success_time ? new Date(resource.success_time) : undefined,
       raw: body,
     };
   }
@@ -289,12 +311,179 @@ export class WechatPayProvider implements PaymentProvider {
   // 验签失败绝不返回 verified=true，禁止兼容性假成功。
   async handleWebhook(payload: WebhookPayload): Promise<WebhookResult> {
     if (!this.verifyCallback(payload.body, payload.headers)) {
-      return { verified: false, error: '微信回调验签失败（需微信平台证书，验签未通过前拒绝处理）' };
+      return { verified: false, error: '微信回调验签失败' };
     }
     try {
-      return { verified: true, data: this.parseCallback(payload.body) };
+      const envelope = typeof payload.body === 'string'
+        ? JSON.parse(payload.body) as { event_type?: string }
+        : payload.body as { event_type?: string };
+      if (envelope.event_type !== 'TRANSACTION.SUCCESS') {
+        return { verified: false, error: `非支付成功通知: ${envelope.event_type || 'UNKNOWN'}` };
+      }
+      const data = this.parseCallback(payload.body);
+      const resource = this.parseNotifyResource(payload.body);
+      if (
+        resource.appid !== this.appId ||
+        resource.mchid !== this.mchId ||
+        resource.trade_state !== 'SUCCESS' ||
+        !data.orderNo ||
+        !data.tradeNo ||
+        !Number.isSafeInteger(data.amount) ||
+        data.amount <= 0 ||
+        data.currency !== 'CNY'
+      ) {
+        return { verified: false, error: '微信回调商户、状态或金额字段不一致' };
+      }
+      return { verified: true, data };
     } catch (error) {
       return { verified: false, error: `回调解密/解析失败: ${(error as Error).message}` };
     }
   }
+
+  async handleRefundWebhook(payload: WebhookPayload): Promise<RefundWebhookResult> {
+    if (!this.verifyCallback(payload.body, payload.headers)) {
+      return { verified: false, error: '微信退款回调验签失败' };
+    }
+    try {
+      const envelope = typeof payload.body === 'string'
+        ? JSON.parse(payload.body) as { event_type?: string }
+        : payload.body as { event_type?: string };
+      const eventType = envelope.event_type || '';
+      if (!['REFUND.SUCCESS', 'REFUND.ABNORMAL', 'REFUND.CLOSED'].includes(eventType)) {
+        return { verified: false, error: `非退款终态通知: ${eventType || 'UNKNOWN'}` };
+      }
+      const resource = this.parseRefundNotifyResource(payload.body);
+      if (
+        resource.mchid !== this.mchId ||
+        !resource.out_refund_no ||
+        !resource.out_trade_no ||
+        !resource.refund_id ||
+        !Number.isSafeInteger(resource.amount?.refund) ||
+        (resource.amount?.refund || 0) <= 0
+      ) {
+        return { verified: false, error: '微信退款回调商户或金额字段不一致' };
+      }
+      const status = resource.refund_status === 'SUCCESS'
+        ? 'SUCCESS'
+        : resource.refund_status === 'PROCESSING'
+          ? 'PROCESSING'
+          : 'FAILED';
+      return {
+        verified: true,
+        data: {
+          refundNo: resource.out_refund_no,
+          orderNo: resource.out_trade_no,
+          channelRefundNo: resource.refund_id,
+          refundAmount: resource.amount?.refund || 0,
+          status,
+        },
+      };
+    } catch (error) {
+      return { verified: false, error: `退款回调解密/解析失败: ${(error as Error).message}` };
+    }
+  }
+
+  private buildJsapiPayData(prepayId: string): string {
+    const timeStamp = Math.floor(Date.now() / 1000).toString();
+    const nonceStr = crypto.randomBytes(16).toString('hex');
+    const packageValue = `prepay_id=${prepayId}`;
+    const message = `${this.appId}\n${timeStamp}\n${nonceStr}\n${packageValue}\n`;
+    const signer = crypto.createSign('RSA-SHA256');
+    signer.update(message, 'utf8');
+    const paySign = signer.sign(this.merchantPrivateKey, 'base64');
+    return JSON.stringify({
+      appId: this.appId,
+      timeStamp,
+      nonceStr,
+      package: packageValue,
+      signType: 'RSA',
+      paySign,
+    });
+  }
+
+  private parseNotifyResource(body: unknown): {
+    appid?: string;
+    mchid?: string;
+    out_trade_no?: string;
+    transaction_id?: string;
+    trade_state?: string;
+    amount?: { total?: number; currency?: string };
+    success_time?: string;
+  } {
+    const envelope = (typeof body === 'string' ? JSON.parse(body) : body) as {
+      resource?: {
+        algorithm?: string;
+        ciphertext?: string;
+        nonce?: string;
+        associated_data?: string;
+      };
+    };
+    const resource = envelope?.resource;
+    if (
+      resource?.algorithm !== 'AEAD_AES_256_GCM' ||
+      !resource.ciphertext ||
+      !resource.nonce
+    ) {
+      throw new Error('微信回调加密资源不完整');
+    }
+    const decrypted = this.decryptNotify(
+      resource.ciphertext,
+      resource.nonce,
+      resource.associated_data || ''
+    );
+    return JSON.parse(decrypted) as {
+      appid?: string;
+      mchid?: string;
+      out_trade_no?: string;
+      transaction_id?: string;
+      trade_state?: string;
+      amount?: { total?: number; currency?: string };
+      success_time?: string;
+    };
+  }
+
+  private parseRefundNotifyResource(body: unknown): {
+    mchid?: string;
+    out_trade_no?: string;
+    out_refund_no?: string;
+    refund_id?: string;
+    refund_status?: string;
+    amount?: { refund?: number; total?: number; currency?: string };
+  } {
+    const envelope = (typeof body === 'string' ? JSON.parse(body) : body) as {
+      resource?: {
+        algorithm?: string;
+        ciphertext?: string;
+        nonce?: string;
+        associated_data?: string;
+      };
+    };
+    const resource = envelope?.resource;
+    if (
+      resource?.algorithm !== 'AEAD_AES_256_GCM' ||
+      !resource.ciphertext ||
+      !resource.nonce
+    ) {
+      throw new Error('微信退款回调加密资源不完整');
+    }
+    const decrypted = this.decryptNotify(
+      resource.ciphertext,
+      resource.nonce,
+      resource.associated_data || ''
+    );
+    return JSON.parse(decrypted) as {
+      mchid?: string;
+      out_trade_no?: string;
+      out_refund_no?: string;
+      refund_id?: string;
+      refund_status?: string;
+      amount?: { refund?: number; total?: number; currency?: string };
+    };
+  }
+}
+
+function normalizeHeaders(headers: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value])
+  );
 }

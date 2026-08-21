@@ -5,7 +5,7 @@ import { resolveProvider } from '@/lib/payment/resolver';
 import { amountToFen } from '@/lib/payment/config';
 import { recordAuditLog } from '@/lib/audit';
 
-// 主动向支付宝查单补偿（不依赖回调）
+// 主动向官方渠道查单补偿（不依赖回调）
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ orderNo: string }> }
@@ -17,20 +17,22 @@ export async function POST(
       return errorResponse('订单不存在', 404);
     }
 
-    // 过期扫描：仍未支付且已过期
-    if (
+    const isExpired =
       (order.status === 'CREATED' || order.status === 'PAYING') &&
-      order.expiredAt &&
-      order.expiredAt.getTime() < Date.now()
-    ) {
-      await prisma.order.update({
-        where: { id: order.id },
-        data: { status: 'CLOSED', closedAt: new Date() },
-      });
-      return successResponse({ status: 'CLOSED', source: 'EXPIRED' });
-    }
+      !!order.expiredAt &&
+      order.expiredAt.getTime() < Date.now();
 
-    if (order.paymentEnv === 'PREVIEW' || !order.channel.startsWith('ALIPAY')) {
+    if (
+      order.paymentEnv === 'PREVIEW' ||
+      (!order.channel.startsWith('ALIPAY') && !order.channel.startsWith('WECHAT'))
+    ) {
+      if (order.paymentEnv === 'PREVIEW' && isExpired) {
+        await prisma.order.updateMany({
+          where: { id: order.id, status: { in: ['CREATED', 'PAYING'] } },
+          data: { status: 'CLOSED', closedAt: new Date() },
+        });
+        return successResponse({ status: 'CLOSED', source: 'PREVIEW_EXPIRED' });
+      }
       return successResponse({ status: order.status, source: 'LOCAL' });
     }
 
@@ -38,7 +40,9 @@ export async function POST(
       where: { merchantId: order.merchantId, channel: order.channel, isActive: true },
     });
     const resolved = resolveProvider(order.channel, paymentConfig);
-    if (!resolved.provider || !resolved.usable) return successResponse({ status: order.status, source: 'LOCAL' });
+    if (!resolved.provider || !resolved.usable) {
+      return errorResponse('支付渠道配置不完整，无法执行官方查单', 503);
+    }
 
     const result = await resolved.provider.queryOrder({
       orderNo,
@@ -49,18 +53,21 @@ export async function POST(
       // 金额一致性校验 — 使用整数分精确比较，禁止 JS 浮点
       if (result.amount !== undefined) {
         const orderAmountFen = amountToFen(order.amount.toString());
-        const queryAmountFen = result.amount; // queryOrder 返回整数分
+        const queryAmountFen = result.amount; // Provider 统一返回整数最小货币单位
         if (orderAmountFen !== queryAmountFen) {
           return errorResponse('查询结果金额与订单不一致，已拒绝更新', 409);
         }
       }
       await prisma.$transaction(async (tx) => {
-        const current = await tx.order.findUnique({ where: { id: order.id }, select: { status: true } });
-        if (current?.status !== 'CREATED' && current?.status !== 'PAYING') return;
-        await tx.order.update({
-          where: { id: order.id },
-          data: { status: 'PAID', paidAt: new Date(), channelTradeNo: result.tradeNo ?? order.channelTradeNo },
+        const claimed = await tx.order.updateMany({
+          where: { id: order.id, status: { in: ['CREATED', 'PAYING'] } },
+          data: {
+            status: 'PAID',
+            paidAt: result.paidAt || new Date(),
+            channelTradeNo: result.tradeNo ?? order.channelTradeNo,
+          },
         });
+        if (claimed.count === 0) return;
         await tx.paymentRecord.create({
           data: {
             orderId: order.id,
@@ -78,7 +85,17 @@ export async function POST(
         result: 'SUCCESS',
         detail: `主动查单确认支付成功 - ${orderNo}`,
       });
-      return successResponse({ status: 'PAID', source: 'ALIPAY_QUERY' });
+      return successResponse({ status: 'PAID', source: `${order.channel}_QUERY` });
+    }
+
+    if (isExpired && result.status === 'UNPAID') {
+      const closed = await resolved.provider.closeOrder({ orderNo });
+      if (!closed) return errorResponse('订单已过期，但官方渠道未确认关闭', 502);
+      await prisma.order.updateMany({
+        where: { id: order.id, status: { in: ['CREATED', 'PAYING'] } },
+        data: { status: 'CLOSED', closedAt: new Date() },
+      });
+      return successResponse({ status: 'CLOSED', source: `${order.channel}_EXPIRED_CLOSE` });
     }
 
     if (result.status === 'CLOSED' && order.status !== 'PAID') {
@@ -86,9 +103,9 @@ export async function POST(
         where: { id: order.id },
         data: { status: 'CLOSED', closedAt: new Date() },
       });
-      return successResponse({ status: 'CLOSED', source: 'ALIPAY_QUERY' });
+      return successResponse({ status: 'CLOSED', source: `${order.channel}_QUERY` });
     }
 
-    return successResponse({ status: order.status, source: 'ALIPAY_QUERY' });
+    return successResponse({ status: order.status, source: `${order.channel}_QUERY` });
   }, ['MERCHANT_OWNER', 'MERCHANT_ADMIN', 'FINANCE', 'STORE_MANAGER', 'CASHIER']);
 }

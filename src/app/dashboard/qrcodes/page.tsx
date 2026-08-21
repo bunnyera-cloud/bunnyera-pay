@@ -237,13 +237,14 @@ export default function QRCodesPage() {
           </div>
           {form.type === 'DYNAMIC' ? (
             <Input
-              label="固定金额（可选）"
+              label="订单金额"
               type="number"
               value={form.amount}
               onChange={e => setForm(p => ({ ...p, amount: e.target.value }))}
-              placeholder="留空则顾客自行输入金额"
+              placeholder="请输入动态订单金额"
               step="0.01"
               min="0.01"
+              required
             />
           ) : null}
           <div className="flex gap-3 pt-2">

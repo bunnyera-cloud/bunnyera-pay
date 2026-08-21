@@ -1,6 +1,7 @@
 import prisma from '@/lib/db';
 import { resolveProvider } from './resolver';
 import { recordAuditLog } from '@/lib/audit';
+import { amountToFen, resolveBaseUrl } from './config';
 
 // 退款执行结果：ok=false 时订单绝不被标记为退款成功（fail-closed）
 export interface RefundExecution {
@@ -62,8 +63,8 @@ export async function executeChannelRefund(refundId: string): Promise<RefundExec
   });
   const resolved = resolveProvider(order.channel, paymentConfig);
   if (!resolved.provider || !resolved.usable) {
-    await prisma.refund.update({
-      where: { id: refund.id },
+    await prisma.refund.updateMany({
+      where: { id: refund.id, status: 'PROCESSING' },
       data: { status: 'FAILED', processedAt: new Date() },
     });
     const error = `支付渠道不可用，退款未发起: ${resolved.missing.join(', ')}`;
@@ -87,6 +88,9 @@ export async function executeChannelRefund(refundId: string): Promise<RefundExec
       refundAmount: amount,
       totalAmount,
       reason: refund.reason || undefined,
+      notifyUrl: order.channel.startsWith('WECHAT')
+        ? `${resolveBaseUrl()}/api/pay/wechat/notify`
+        : undefined,
     });
   } catch (error) {
     refundResult = { success: false, error: `渠道退款调用异常: ${(error as Error).message}` };
@@ -94,8 +98,8 @@ export async function executeChannelRefund(refundId: string): Promise<RefundExec
 
   if (!refundResult.success) {
     // 渠道退款失败：退款单 FAILED，订单绝不被标记为退款成功
-    await prisma.refund.update({
-      where: { id: refund.id },
+    await prisma.refund.updateMany({
+      where: { id: refund.id, status: 'PROCESSING' },
       data: { status: 'FAILED', processedAt: new Date() },
     });
     const error = refundResult.error || '渠道退款请求失败';
@@ -117,28 +121,43 @@ export async function executeChannelRefund(refundId: string): Promise<RefundExec
       orderNo: order.orderNo,
     });
     queryStatus = query.status;
+    if (
+      queryStatus === 'SUCCESS' &&
+      query.refundAmount !== undefined &&
+      query.refundAmount !== amountToFen(refund.amount.toString())
+    ) {
+      queryStatus = 'UNKNOWN';
+    }
   } catch {
     queryStatus = 'UNKNOWN';
   }
 
   if (queryStatus === 'SUCCESS') {
-    const isFullRefund = amount >= totalAmount - Number(order.refundAmount);
+    let orderUpdated = false;
     await prisma.$transaction(async (tx) => {
-      await tx.refund.update({
-        where: { id: refund.id },
+      const terminalClaim = await tx.refund.updateMany({
+        where: { id: refund.id, status: 'PROCESSING' },
         data: {
           status: 'SUCCESS',
           channelRefundNo: refundResult.channelRefundNo,
           processedAt: new Date(),
         },
       });
+      if (terminalClaim.count === 0) return;
+      const currentOrder = await tx.order.findUnique({
+        where: { id: order.id },
+        select: { amount: true, refundAmount: true },
+      });
+      if (!currentOrder) throw new Error('退款关联订单不存在');
+      const nextRefundAmount = Number(currentOrder.refundAmount) + amount;
       await tx.order.update({
         where: { id: order.id },
         data: {
           refundAmount: { increment: amount },
-          status: isFullRefund ? 'REFUNDED' : 'PARTIALLY_REFUNDED',
+          status: nextRefundAmount >= Number(currentOrder.amount) ? 'REFUNDED' : 'PARTIALLY_REFUNDED',
         },
       });
+      orderUpdated = true;
     });
     await recordAuditLog({
       action: 'REFUND_EXECUTE',
@@ -147,12 +166,17 @@ export async function executeChannelRefund(refundId: string): Promise<RefundExec
       result: 'SUCCESS',
       detail: `渠道退款成功 - ${refund.refundNo}，金额 ${amount.toFixed(2)}`,
     });
-    return { ok: true, refundStatus: 'SUCCESS', channelRefundNo: refundResult.channelRefundNo, orderUpdated: true };
+    return {
+      ok: true,
+      refundStatus: 'SUCCESS',
+      channelRefundNo: refundResult.channelRefundNo,
+      orderUpdated,
+    };
   }
 
   if (queryStatus === 'FAILED') {
-    await prisma.refund.update({
-      where: { id: refund.id },
+    await prisma.refund.updateMany({
+      where: { id: refund.id, status: 'PROCESSING' },
       data: { status: 'FAILED', channelRefundNo: refundResult.channelRefundNo, processedAt: new Date() },
     });
     await recordAuditLog({
@@ -166,8 +190,8 @@ export async function executeChannelRefund(refundId: string): Promise<RefundExec
   }
 
   // PROCESSING / UNKNOWN：渠道已受理但终态未确认，保持 PROCESSING，不更新订单
-  await prisma.refund.update({
-    where: { id: refund.id },
+  await prisma.refund.updateMany({
+    where: { id: refund.id, status: 'PROCESSING' },
     data: { status: 'PROCESSING', channelRefundNo: refundResult.channelRefundNo, processedAt: new Date() },
   });
   await recordAuditLog({
@@ -183,5 +207,120 @@ export async function executeChannelRefund(refundId: string): Promise<RefundExec
     channelRefundNo: refundResult.channelRefundNo,
     orderUpdated: false,
     error: queryStatus === 'UNKNOWN' ? '渠道退款终态未确认，需查单补偿' : undefined,
+  };
+}
+
+/** 对 PROCESSING 退款执行官方查单补偿，仅官方确认 SUCCESS 后更新订单。 */
+export async function syncChannelRefund(refundId: string): Promise<RefundExecution> {
+  const refund = await prisma.refund.findUnique({
+    where: { id: refundId },
+    include: { order: true },
+  });
+  if (!refund) {
+    return { ok: false, refundStatus: 'SKIPPED', error: '退款记录不存在', orderUpdated: false };
+  }
+  if (refund.status !== 'PROCESSING') {
+    return {
+      ok: false,
+      refundStatus: 'SKIPPED',
+      error: `退款状态（${refund.status}）无需查单`,
+      orderUpdated: false,
+    };
+  }
+
+  const paymentConfig = await prisma.paymentConfig.findFirst({
+    where: {
+      merchantId: refund.order.merchantId,
+      channel: refund.order.channel,
+      isActive: true,
+    },
+  });
+  const resolved = resolveProvider(refund.order.channel, paymentConfig);
+  if (!resolved.provider || !resolved.usable) {
+    return {
+      ok: false,
+      refundStatus: 'PROCESSING',
+      error: '支付渠道配置不完整，无法执行退款查单',
+      orderUpdated: false,
+    };
+  }
+
+  let query;
+  try {
+    query = await resolved.provider.queryRefund({
+      refundNo: refund.refundNo,
+      orderNo: refund.order.orderNo,
+    });
+  } catch {
+    return {
+      ok: false,
+      refundStatus: 'PROCESSING',
+      error: '官方退款查单失败',
+      orderUpdated: false,
+    };
+  }
+
+  if (query.status === 'FAILED') {
+    await prisma.refund.updateMany({
+      where: { id: refund.id, status: 'PROCESSING' },
+      data: { status: 'FAILED', processedAt: new Date() },
+    });
+    return { ok: false, refundStatus: 'FAILED', error: '官方渠道确认退款失败', orderUpdated: false };
+  }
+  if (query.status !== 'SUCCESS') {
+    return {
+      ok: true,
+      refundStatus: 'PROCESSING',
+      channelRefundNo: refund.channelRefundNo || undefined,
+      orderUpdated: false,
+    };
+  }
+
+  const expectedFen = amountToFen(refund.amount.toString());
+  if (query.refundAmount !== undefined && query.refundAmount !== expectedFen) {
+    return {
+      ok: false,
+      refundStatus: 'PROCESSING',
+      error: '官方退款金额与退款单不一致，已拒绝更新',
+      orderUpdated: false,
+    };
+  }
+
+  let orderUpdated = false;
+  await prisma.$transaction(async tx => {
+    const claimed = await tx.refund.updateMany({
+      where: { id: refund.id, status: 'PROCESSING' },
+      data: { status: 'SUCCESS', processedAt: new Date() },
+    });
+    if (claimed.count === 0) return;
+
+    const currentOrder = await tx.order.findUnique({
+      where: { id: refund.order.id },
+      select: { amount: true, refundAmount: true },
+    });
+    if (!currentOrder) throw new Error('退款关联订单不存在');
+    const nextRefundAmount = Number(currentOrder.refundAmount) + Number(refund.amount);
+    await tx.order.update({
+      where: { id: refund.order.id },
+      data: {
+        refundAmount: { increment: refund.amount },
+        status: nextRefundAmount >= Number(currentOrder.amount) ? 'REFUNDED' : 'PARTIALLY_REFUNDED',
+      },
+    });
+    orderUpdated = true;
+  });
+
+  await recordAuditLog({
+    action: 'REFUND_SYNC',
+    resource: 'refund',
+    resourceId: refund.id,
+    result: 'SUCCESS',
+    detail: `官方退款查单确认成功 - ${refund.refundNo}`,
+  });
+  return {
+    ok: true,
+    refundStatus: 'SUCCESS',
+    channelRefundNo: refund.channelRefundNo || undefined,
+    orderUpdated,
   };
 }

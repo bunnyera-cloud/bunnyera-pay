@@ -40,8 +40,13 @@ echo "等待数据库就绪..."
 sleep 10
 
 echo ""
-echo "2/4 推送数据库表结构..."
-npx prisma db push --accept-data-loss --skip-generate
+echo "2/4 应用已审核的数据库迁移..."
+if [ ! -d prisma/migrations ]; then
+  echo "❌ 错误: 缺少 prisma/migrations，拒绝对生产数据库执行 db push。"
+  echo "   请先在非生产环境生成、审核并提交 migration。"
+  exit 1
+fi
+npx prisma migrate deploy
 
 echo ""
 echo "3/4 构建应用..."

@@ -29,6 +29,9 @@ export interface PaymentProvider {
   // 验签失败必须返回 verified=false，调用方不得继续处理；禁止兼容性假成功。
   handleWebhook(payload: WebhookPayload): Promise<WebhookResult>;
 
+  // 退款通知（仅支持该渠道时实现）；仍必须先验签/解密再返回业务数据
+  handleRefundWebhook?(payload: WebhookPayload): Promise<RefundWebhookResult>;
+
   // 下载账单
   downloadBill?(date: string): Promise<BillData>;
 }
@@ -43,6 +46,18 @@ export interface WebhookPayload {
 export interface WebhookResult {
   verified: boolean;
   data?: CallbackData;
+  error?: string;
+}
+
+export interface RefundWebhookResult {
+  verified: boolean;
+  data?: {
+    refundNo: string;
+    orderNo: string;
+    channelRefundNo: string;
+    refundAmount: number;
+    status: 'SUCCESS' | 'PROCESSING' | 'FAILED';
+  };
   error?: string;
 }
 
@@ -71,6 +86,7 @@ export interface QueryOrderParams {
 
 export interface OrderQueryResult {
   status: 'PAID' | 'UNPAID' | 'CLOSED' | 'REFUNDED' | 'UNKNOWN';
+  /** 渠道返回金额，整数最小货币单位；CNY 为分 */
   amount?: number;
   tradeNo?: string;
   paidAt?: Date;
@@ -103,12 +119,14 @@ export interface QueryRefundParams {
 
 export interface RefundQueryResult {
   status: 'SUCCESS' | 'PROCESSING' | 'FAILED' | 'UNKNOWN';
+  /** 渠道返回退款金额，整数最小货币单位；CNY 为分 */
   refundAmount?: number;
 }
 
 export interface CallbackData {
   orderNo: string;
   tradeNo: string;
+  /** 整数最小货币单位；CNY 为分 */
   amount: number;
   currency: string;
   status: 'SUCCESS' | 'FAILED';

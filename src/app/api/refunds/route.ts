@@ -4,12 +4,16 @@ import { Prisma, RefundStatus } from '@prisma/client';
 import { withAuth, successResponse, errorResponse } from '@/lib/api-utils';
 import { generateRefundNo } from '@/lib/auth';
 import { recordAuditLog } from '@/lib/audit';
-import { executeChannelRefund } from '@/lib/payment/refund-service';
+import { executeChannelRefund, syncChannelRefund } from '@/lib/payment/refund-service';
 import { z } from 'zod';
+import Decimal from 'decimal.js';
 
 const refundSchema = z.object({
   orderId: z.string(),
-  amount: z.number().positive(),
+  amount: z.number().positive().refine(
+    value => new Decimal(value).decimalPlaces() <= 2,
+    '退款金额最多保留两位小数'
+  ),
   reason: z.string().optional(),
 });
 
@@ -34,8 +38,18 @@ export async function POST(request: NextRequest) {
       return errorResponse('当前订单状态不支持退款', 400);
     }
 
-    // 检查退款金额
-    const maxRefundable = Number(order.amount) - Number(order.refundAmount);
+    // 检查退款金额，并扣除尚未到终态的在途退款，避免重复申请透支可退金额。
+    const reserved = await prisma.refund.aggregate({
+      where: {
+        orderId: order.id,
+        status: { in: ['PENDING', 'APPROVED', 'PROCESSING'] },
+      },
+      _sum: { amount: true },
+    });
+    const maxRefundable =
+      Number(order.amount) -
+      Number(order.refundAmount) -
+      Number(reserved._sum.amount || 0);
     if (amount > maxRefundable) {
       return errorResponse(`退款金额超过可退金额 ${maxRefundable.toFixed(2)}`, 400);
     }
@@ -114,5 +128,28 @@ export async function GET(request: NextRequest) {
       data: refunds,
       pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) },
     });
+  }, ['MERCHANT_OWNER', 'MERCHANT_ADMIN', 'FINANCE', 'CUSTOMER_SERVICE']);
+}
+
+// 主动向官方渠道查询 PROCESSING 退款并修复终态
+export async function PATCH(request: NextRequest) {
+  return withAuth(request, async (req, ctx) => {
+    const validation = z.object({ refundNo: z.string().min(1).max(64) }).safeParse(await req.json());
+    if (!validation.success) return errorResponse('退款单号格式错误', 400);
+
+    const refund = await prisma.refund.findFirst({
+      where: {
+        refundNo: validation.data.refundNo,
+        merchantId: ctx.user.merchantId,
+      },
+    });
+    if (!refund) return errorResponse('退款记录不存在', 404);
+
+    const execution = await syncChannelRefund(refund.id);
+    if (!execution.ok && execution.refundStatus !== 'FAILED') {
+      return errorResponse(execution.error || '退款查单未完成', 502);
+    }
+    const latest = await prisma.refund.findUnique({ where: { id: refund.id } });
+    return successResponse(latest, execution.refundStatus === 'SUCCESS' ? '退款已确认成功' : '退款状态已同步');
   }, ['MERCHANT_OWNER', 'MERCHANT_ADMIN', 'FINANCE', 'CUSTOMER_SERVICE']);
 }

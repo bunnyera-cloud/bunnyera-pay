@@ -17,21 +17,31 @@ export async function POST(
     }
     if (order.status === 'PAID') return errorResponse('订单已支付，不能关闭', 409);
     if (order.status === 'CLOSED') return successResponse({ status: 'CLOSED' });
+    if (order.status !== 'CREATED' && order.status !== 'PAYING') {
+      return errorResponse(`订单状态（${order.status}）不可关闭`, 409);
+    }
 
-    if (order.paymentEnv !== 'PREVIEW' && order.channel.startsWith('ALIPAY')) {
+    if (order.paymentEnv !== 'PREVIEW') {
       const paymentConfig = await prisma.paymentConfig.findFirst({
         where: { merchantId: order.merchantId, channel: order.channel, isActive: true },
       });
       const resolved = resolveProvider(order.channel, paymentConfig);
-      if (resolved.provider && resolved.usable) {
-        await resolved.provider.closeOrder({ orderNo });
+      if (!resolved.provider || !resolved.usable) {
+        return errorResponse('支付渠道配置不完整，无法安全关闭官方订单', 503);
+      }
+      const closed = await resolved.provider.closeOrder({ orderNo });
+      if (!closed) {
+        return errorResponse('官方渠道未确认订单关闭，本地状态保持不变', 502);
       }
     }
 
-    await prisma.order.update({
-      where: { id: order.id },
+    const updated = await prisma.order.updateMany({
+      where: { id: order.id, status: { in: ['CREATED', 'PAYING'] } },
       data: { status: 'CLOSED', closedAt: new Date() },
     });
+    if (updated.count === 0) {
+      return errorResponse('订单状态已发生变化，请刷新后重试', 409);
+    }
     await recordAuditLog({
       action: 'ORDER_CLOSE',
       resource: 'order',

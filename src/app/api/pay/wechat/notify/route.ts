@@ -4,6 +4,8 @@ import { Prisma } from '@prisma/client';
 import { recordAuditLog } from '@/lib/audit';
 import { resolveProvider } from '@/lib/payment/resolver';
 import { amountToFen } from '@/lib/payment/config';
+import { sanitizePaymentPayload } from '@/lib/payment/sanitize';
+import { syncChannelRefund } from '@/lib/payment/refund-service';
 
 // 微信支付回调通知处理
 // 统一 Webhook contract：读取请求 -> resolve provider -> provider.handleWebhook() -> 幂等更新
@@ -41,22 +43,93 @@ export async function POST(request: NextRequest) {
       const resolved = resolveProvider(config.channel, config);
       if (!resolved.provider || !resolved.usable) continue;
 
+      const eventType = (body as { event_type?: string }).event_type || '';
+      if (eventType.startsWith('REFUND.')) {
+        if (!resolved.provider.handleRefundWebhook) continue;
+        const refundWebhook = await resolved.provider.handleRefundWebhook({ body: rawBody, headers });
+        if (!refundWebhook.verified || !refundWebhook.data) continue;
+
+        const refundData = refundWebhook.data;
+        const refund = await prisma.refund.findUnique({
+          where: { refundNo: refundData.refundNo },
+          include: { order: true },
+        });
+        if (
+          !refund ||
+          refund.merchantId !== config.merchantId ||
+          refund.order.channel !== config.channel ||
+          refund.order.orderNo !== refundData.orderNo
+        ) continue;
+        if (amountToFen(refund.amount.toString()) !== refundData.refundAmount) {
+          return NextResponse.json({ code: 'FAIL', message: '退款金额不一致' });
+        }
+
+        const sanitizedBody = sanitizePaymentPayload(body) as Prisma.InputJsonValue;
+        const callbackLog = await prisma.callbackLog.create({
+          data: {
+            orderId: refund.orderId,
+            channel: refund.order.channel,
+            rawData: sanitizedBody,
+            signature: headers['wechatpay-signature'] ? '[PRESENT]' : null,
+            verified: true,
+            processed: false,
+          },
+        });
+
+        if (refund.status === 'SUCCESS' || refund.status === 'FAILED') {
+          await prisma.callbackLog.update({
+            where: { id: callbackLog.id },
+            data: { processed: true, error: `退款状态(${refund.status})已终态，幂等返回` },
+          });
+          return NextResponse.json({ code: 'SUCCESS', message: '已处理' });
+        }
+        if (refundData.status === 'FAILED') {
+          await prisma.refund.updateMany({
+            where: { id: refund.id, status: 'PROCESSING' },
+            data: {
+              status: 'FAILED',
+              channelRefundNo: refundData.channelRefundNo,
+              processedAt: new Date(),
+            },
+          });
+        } else if (refundData.status === 'SUCCESS') {
+          const sync = await syncChannelRefund(refund.id);
+          if (!sync.ok) {
+            await prisma.callbackLog.update({
+              where: { id: callbackLog.id },
+              data: { error: sync.error || '退款官方查单未确认成功' },
+            });
+            return NextResponse.json({ code: 'FAIL', message: '退款终态确认失败' });
+          }
+        }
+        await prisma.callbackLog.update({
+          where: { id: callbackLog.id },
+          data: { processed: true },
+        });
+        return NextResponse.json({ code: 'SUCCESS', message: '成功' });
+      }
+
       // 验签失败必须拒绝处理，禁止兼容性假成功
-      const webhook = await resolved.provider.handleWebhook({ body, headers });
+      const webhook = await resolved.provider.handleWebhook({ body: rawBody, headers });
       if (!webhook.verified || !webhook.data || !webhook.data.orderNo) continue;
 
       const callbackData = webhook.data;
       const order = await prisma.order.findUnique({ where: { orderNo: callbackData.orderNo } });
       // 订单必须归属于当前验签通过的商户配置
-      if (!order || order.merchantId !== config.merchantId) continue;
+      if (
+        !order ||
+        order.merchantId !== config.merchantId ||
+        order.channel !== config.channel
+      ) continue;
+      const sanitizedBody = sanitizePaymentPayload(body) as Prisma.InputJsonValue;
 
       // 记录回调日志
       const callbackLog = await prisma.callbackLog.create({
         data: {
           orderId: order.id,
           channel: order.channel,
-          rawData: body as unknown as Prisma.InputJsonValue,
-          signature: headers['wechatpay-signature'],
+          rawData: sanitizedBody,
+          signature: headers['wechatpay-signature'] ? '[PRESENT]' : null,
           verified: true,
           processed: false,
         },
@@ -82,7 +155,7 @@ export async function POST(request: NextRequest) {
 
       // 金额一致性校验 — 使用整数分精确比较，禁止 JS 浮点
       const orderAmountFen = amountToFen(order.amount.toString());
-      const callbackAmountFen = Math.round(callbackData.amount * 100);
+      const callbackAmountFen = callbackData.amount;
       if (orderAmountFen !== callbackAmountFen) {
         console.error(
           `Wechat callback: amount mismatch - order: ${order.amount} (${orderAmountFen}分), callback: ${callbackAmountFen}分`
@@ -97,33 +170,26 @@ export async function POST(request: NextRequest) {
       // 更新订单状态（事务保证原子性，并发安全）
       if (callbackData.status === 'SUCCESS') {
         await prisma.$transaction(async (tx) => {
-          const currentOrder = await tx.order.findUnique({
-            where: { id: order.id },
-            select: { status: true },
-          });
-          if (currentOrder?.status !== 'CREATED' && currentOrder?.status !== 'PAYING') {
-            return; // 已被其他回调处理
-          }
-
-          await tx.order.update({
-            where: { id: order.id },
+          const claimed = await tx.order.updateMany({
+            where: { id: order.id, status: { in: ['CREATED', 'PAYING'] } },
             data: {
               status: 'PAID',
               channelTradeNo: callbackData.tradeNo,
               paidAt: callbackData.paidAt || new Date(),
-              callbackRaw: body as unknown as Prisma.InputJsonValue,
+              callbackRaw: sanitizedBody,
               callbackCount: { increment: 1 },
             },
           });
+          if (claimed.count === 0) return;
 
           await tx.paymentRecord.create({
             data: {
               orderId: order.id,
-              amount: callbackData.amount,
+              amount: (callbackData.amount / 100).toFixed(2),
               channel: order.channel,
               channelTradeNo: callbackData.tradeNo,
               status: 'SUCCESS',
-              rawData: callbackData.raw as unknown as Prisma.InputJsonValue,
+              rawData: sanitizedBody,
             },
           });
         });
@@ -133,7 +199,7 @@ export async function POST(request: NextRequest) {
           resource: 'order',
           resourceId: order.id,
           result: 'SUCCESS',
-          detail: `微信支付回调 - 订单 ${callbackData.orderNo}，金额 ${callbackData.amount}`,
+          detail: `微信支付回调 - 订单 ${callbackData.orderNo}，金额 ${(callbackData.amount / 100).toFixed(2)}`,
         });
       }
 

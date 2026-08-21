@@ -192,18 +192,8 @@ export default function CollectQrPage() {
                 <div className="mt-4 rounded-lg bg-amber-50 border border-amber-200 p-3 text-left">
                   <div className="text-xs font-medium text-amber-800">演示预览模式（非真实收款）</div>
                   <p className="text-xs text-amber-700 mt-1">
-                    支付渠道尚未配置或未审核通过，此二维码不会产生真实资金。
+                    此二维码仅用于检查页面流程，不会产生真实资金，也不会被标记为支付成功。
                   </p>
-                  <button
-                    onClick={async () => {
-                      await fetch(`/api/orders/${orderNo}/preview-paid`, {
-                        method: 'POST', headers: { Authorization: `Bearer ${token()}` },
-                      });
-                      load();
-                    }}
-                    className="mt-2 text-xs px-3 py-1.5 rounded-md bg-amber-600 text-white">
-                    模拟支付成功（仅演示）
-                  </button>
                 </div>
               )}
             </section>

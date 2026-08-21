@@ -2,8 +2,7 @@ import type { PaymentChannel, PaymentConfig } from '@prisma/client';
 import type { PaymentProvider } from './provider';
 import { AlipayProvider } from './alipay';
 import { WechatPayProvider } from './wechat';
-import { UnionPayProvider } from './unionpay';
-import { resolveAlipayConfig } from './config';
+import { resolveAlipayConfig, resolveWechatConfig } from './config';
 
 // Provider 解析结果：provider 为空或 usable=false 时，业务层必须 fail-closed 拒绝
 export interface ResolvedProvider {
@@ -37,6 +36,8 @@ export function resolveProvider(
         publicKey: cfg.publicKey,
         gateway: cfg.gateway,
         sellerId: cfg.sellerId,
+        appCertSn: cfg.appCertSn,
+        alipayRootCertSn: cfg.alipayRootCertSn,
         channel: ch,
       }),
       usable: true,
@@ -46,22 +47,19 @@ export function resolveProvider(
 
   // 微信支付系：Native / H5 / JSAPI / 小程序
   if (channel.startsWith('WECHAT')) {
-    const missing: string[] = [];
-    if (!paymentConfig?.appId) missing.push('WECHAT_APP_ID');
-    if (!paymentConfig?.mchId) missing.push('WECHAT_MCH_ID');
-    if (!paymentConfig?.apiKey) missing.push('WECHAT_API_KEY');
-    if (!paymentConfig?.serialNo) missing.push('WECHAT_SERIAL_NO');
-    if (!paymentConfig?.privateKey) missing.push('WECHAT_PRIVATE_KEY');
-    if (missing.length > 0 || !paymentConfig) {
-      return { provider: null, usable: false, missing };
+    const cfg = resolveWechatConfig(paymentConfig);
+    if (!cfg.usable) {
+      return { provider: null, usable: false, missing: cfg.missing };
     }
     return {
       provider: new WechatPayProvider({
-        appId: paymentConfig.appId || '',
-        mchId: paymentConfig.mchId || '',
-        apiKey: paymentConfig.apiKey || '',
-        serialNo: paymentConfig.serialNo || '',
-        privateKey: paymentConfig.privateKey || '',
+        appId: cfg.appId,
+        mchId: cfg.mchId,
+        apiV3Key: cfg.apiV3Key,
+        merchantSerialNo: cfg.merchantSerialNo,
+        merchantPrivateKey: cfg.merchantPrivateKey,
+        platformPublicKey: cfg.platformPublicKey,
+        platformSerialNo: cfg.platformSerialNo,
         channel: ch,
       }),
       usable: true,
@@ -71,23 +69,8 @@ export function resolveProvider(
 
   // 银联系：网关 / WAP / 二维码
   if (channel.startsWith('UNIONPAY')) {
-    const missing: string[] = [];
-    if (!paymentConfig?.unionpayMchId) missing.push('UNIONPAY_MCH_ID');
-    if (!paymentConfig?.unionpayCert) missing.push('UNIONPAY_CERT');
-    if (missing.length > 0 || !paymentConfig) {
-      return { provider: null, usable: false, missing };
-    }
-    return {
-      provider: new UnionPayProvider({
-        merId: paymentConfig.unionpayMchId || '',
-        certPath: paymentConfig.unionpayCert || '',
-        certPass: process.env.UNIONPAY_CERT_PASSWORD || '',
-        gateway: paymentConfig.gateway || process.env.UNIONPAY_GATEWAY || 'https://gateway.95516.com',
-        channel: ch,
-      }),
-      usable: true,
-      missing: [],
-    };
+    // 当前 UnionPayProvider 仍是未签名的草稿实现，绝不能暴露为真实可用渠道。
+    return { provider: null, usable: false, missing: ['UNIONPAY_PROVIDER_NOT_IMPLEMENTED'] };
   }
 
   // 未来 ANTOM_* / CHINAUMS_* / LAKALA_* Adapter 在此统一插入

@@ -25,6 +25,8 @@ export class AlipayProvider implements PaymentProvider {
   private publicKey: string;
   private gateway: string;
   private sellerId: string;
+  private appCertSn: string;
+  private alipayRootCertSn: string;
 
   constructor(config: {
     appId: string;
@@ -32,6 +34,8 @@ export class AlipayProvider implements PaymentProvider {
     publicKey: string;
     gateway: string;
     sellerId?: string;
+    appCertSn?: string;
+    alipayRootCertSn?: string;
     channel: PaymentChannel;
   }) {
     this.channel = config.channel;
@@ -40,6 +44,8 @@ export class AlipayProvider implements PaymentProvider {
     this.publicKey = config.publicKey;
     this.gateway = config.gateway;
     this.sellerId = config.sellerId || '';
+    this.appCertSn = config.appCertSn || '';
+    this.alipayRootCertSn = config.alipayRootCertSn || '';
   }
 
   // 生成签名
@@ -63,9 +69,18 @@ export class AlipayProvider implements PaymentProvider {
       .map(k => `${k}=${params[k]}`)
       .join('&');
 
-    const verify = crypto.createVerify('RSA-SHA256');
-    verify.update(signStr, 'utf8');
-    return verify.verify(this.publicKey, signature, 'base64');
+    return this.verifyContent(signStr, signature);
+  }
+
+  private verifyContent(content: string, signature: string): boolean {
+    try {
+      const verify = crypto.createVerify('RSA-SHA256');
+      verify.update(content, 'utf8');
+      verify.end();
+      return verify.verify(this.publicKey, signature, 'base64');
+    } catch {
+      return false;
+    }
   }
 
   // 构建请求参数
@@ -83,6 +98,11 @@ export class AlipayProvider implements PaymentProvider {
       version: '1.0',
       biz_content: JSON.stringify(bizContent),
     };
+    // 证书模式下由配置提供官方计算所得证书序列号；公钥模式保持不传。
+    if (this.appCertSn && this.alipayRootCertSn) {
+      params.app_cert_sn = this.appCertSn;
+      params.alipay_root_cert_sn = this.alipayRootCertSn;
+    }
     if (options?.notifyUrl) params.notify_url = options.notifyUrl;
     if (options?.returnUrl) params.return_url = options.returnUrl;
     params.sign = this.sign(params);
@@ -100,8 +120,25 @@ export class AlipayProvider implements PaymentProvider {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     });
+    const raw = await response.text();
+    if (!response.ok) {
+      throw new Error(`支付宝 API HTTP 错误: ${response.status}`);
+    }
 
-    return response.json();
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      throw new Error('支付宝 API 响应格式错误');
+    }
+
+    const responseKey = `${params.method.replace(/\./g, '_')}_response`;
+    const signature = typeof parsed.sign === 'string' ? parsed.sign : '';
+    const signedContent = extractJsonObject(raw, responseKey);
+    if (!signature || !signedContent || !this.verifyContent(signedContent, signature)) {
+      throw new Error('支付宝 API 响应验签失败');
+    }
+    return parsed;
   }
 
   async createPayment(params: CreatePaymentParams): Promise<CreatePaymentResult> {
@@ -150,7 +187,7 @@ export class AlipayProvider implements PaymentProvider {
             tradeNo: response.trade_no,
           };
         }
-        return { success: false, error: response?.sub_msg || '创建支付失败' };
+        return { success: false, error: mapAlipayError(response, '创建支付失败') };
       }
 
       // 对于网页支付，生成跳转 URL
@@ -224,7 +261,7 @@ export class AlipayProvider implements PaymentProvider {
       if (response?.code === '10000') {
         return { success: true, channelRefundNo: response.trade_no };
       }
-      return { success: false, error: response?.sub_msg || '退款失败' };
+      return { success: false, error: mapAlipayError(response, '退款失败') };
     } catch (error) {
       return { success: false, error: (error as Error).message };
     }
@@ -243,7 +280,7 @@ export class AlipayProvider implements PaymentProvider {
       if (response?.code === '10000') {
         return {
           status: response.refund_amount ? 'SUCCESS' : 'PROCESSING',
-          refundAmount: parseFloat(response.refund_amount || '0'),
+          refundAmount: amountToFen(response.refund_amount || '0'),
         };
       }
       return { status: 'UNKNOWN' };
@@ -297,14 +334,70 @@ export class AlipayProvider implements PaymentProvider {
     }
 
     // seller_id 校验（可以可靠获得时校验）
-    if (this.sellerId && params.seller_id && params.seller_id !== this.sellerId) {
+    if (this.sellerId && params.seller_id !== this.sellerId) {
       return { verified: false, error: 'seller_id 与服务端配置不一致' };
     }
 
     try {
-      return { verified: true, data: this.parseCallback(payload.body) };
+      const data = this.parseCallback(payload.body);
+      if (
+        !data.orderNo ||
+        !data.tradeNo ||
+        !Number.isSafeInteger(data.amount) ||
+        data.amount <= 0 ||
+        data.currency !== 'CNY'
+      ) {
+        return { verified: false, error: '回调订单号、交易号或金额字段非法' };
+      }
+      return { verified: true, data };
     } catch (error) {
       return { verified: false, error: `回调解析失败: ${(error as Error).message}` };
     }
   }
+}
+
+function mapAlipayError(
+  response: { code?: string; sub_code?: string; sub_msg?: string } | undefined,
+  fallback: string
+): string {
+  const code = response?.sub_code || response?.code;
+  const message = response?.sub_msg?.slice(0, 200);
+  return [code ? `[${code}]` : '', message || fallback].filter(Boolean).join(' ');
+}
+
+/**
+ * 提取支付宝原始 JSON 中参与签名的 `<method>_response` 对象。
+ * 不能对解析后的对象重新 JSON.stringify，否则空白或转义差异会破坏验签原文。
+ */
+function extractJsonObject(raw: string, key: string): string | null {
+  const marker = `"${key}"`;
+  const keyIndex = raw.indexOf(marker);
+  if (keyIndex < 0) return null;
+  const colonIndex = raw.indexOf(':', keyIndex + marker.length);
+  if (colonIndex < 0) return null;
+  let start = colonIndex + 1;
+  while (/\s/.test(raw[start] || '')) start += 1;
+  if (raw[start] !== '{') return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < raw.length; index += 1) {
+    const char = raw[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+    } else if (char === '{') {
+      depth += 1;
+    } else if (char === '}') {
+      depth -= 1;
+      if (depth === 0) return raw.slice(start, index + 1);
+    }
+  }
+  return null;
 }

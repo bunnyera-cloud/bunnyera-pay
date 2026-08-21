@@ -3,7 +3,7 @@ import prisma from '@/lib/db';
 import { withAuth, successResponse, errorResponse } from '@/lib/api-utils';
 import { generateOrderNo } from '@/lib/auth';
 import { resolveProvider } from '@/lib/payment/resolver';
-import { resolveAlipayNotifyUrl, resolveBaseUrl } from '@/lib/payment/config';
+import { resolveAlipayNotifyUrl, resolveBaseUrl, resolvePaymentEnv } from '@/lib/payment/config';
 import { z } from 'zod';
 
 // 统一聚合支付请求
@@ -49,7 +49,7 @@ export async function POST(request: NextRequest) {
 
     // 验证商户状态
     const merchant = await prisma.merchant.findUnique({ where: { id: merchantId } });
-    if (!merchant || merchant.status === 'REJECTED' || merchant.status === 'TERMINATED') {
+    if (!merchant || merchant.status !== 'ACTIVE') {
       return errorResponse('商户不可用', 403);
     }
 
@@ -97,6 +97,7 @@ export async function POST(request: NextRequest) {
       // 调用真实支付渠道
       try {
         const baseUrl = resolveBaseUrl(req.headers);
+        const paymentEnv = resolvePaymentEnv();
         const notifyUrl = data.channel.startsWith('ALIPAY')
           ? resolveAlipayNotifyUrl(req.headers, paymentConfig.notifyUrl)
           : data.channel.startsWith('WECHAT')
@@ -115,7 +116,12 @@ export async function POST(request: NextRequest) {
         if (result.success) {
           await prisma.order.update({
             where: { id: order.id },
-            data: { status: 'PAYING', channelTradeNo: result.tradeNo },
+            data: {
+              status: 'PAYING',
+              channelTradeNo: result.tradeNo,
+              payData: result.payData,
+              paymentEnv,
+            },
           });
 
           return successResponse({
@@ -143,14 +149,15 @@ export async function POST(request: NextRequest) {
     // 未指定渠道：返回商户已配置且可用的渠道列表；无任何配置时返回明确业务错误
     const configs = await prisma.paymentConfig.findMany({
       where: { merchantId, isActive: true },
-      select: { channel: true, isSandbox: true },
     });
 
-    const availableChannels = configs.map(c => ({
-      channel: c.channel,
-      channelName: getChannelName(c.channel),
-      isSandbox: c.isSandbox,
-    }));
+    const availableChannels = configs
+      .filter(c => resolveProvider(c.channel, c).usable)
+      .map(c => ({
+        channel: c.channel,
+        channelName: getChannelName(c.channel),
+        isSandbox: c.isSandbox,
+      }));
 
     if (availableChannels.length === 0) {
       return errorResponse('该商户尚未配置任何支付渠道', 400);
