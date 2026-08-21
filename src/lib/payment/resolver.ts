@@ -1,8 +1,13 @@
-import type { PaymentChannel, PaymentConfig } from '@prisma/client';
-import type { PaymentProvider } from './provider';
-import { AlipayProvider } from './alipay';
-import { WechatPayProvider } from './wechat';
-import { resolveAlipayConfig, resolveWechatConfig } from './config';
+import type { PaymentChannel, PaymentConfig } from "@prisma/client";
+import type { PaymentProvider } from "./provider";
+import { AlipayProvider } from "./alipay";
+import { WechatPayProvider } from "./wechat";
+import { UnionPayProvider } from "./unionpay";
+import {
+  resolveAlipayConfig,
+  resolveUnionPayConfig,
+  resolveWechatConfig,
+} from "./config";
 
 // Provider 解析结果：provider 为空或 usable=false 时，业务层必须 fail-closed 拒绝
 export interface ResolvedProvider {
@@ -19,12 +24,12 @@ export interface ResolvedProvider {
  */
 export function resolveProvider(
   channel: PaymentChannel | string,
-  paymentConfig?: PaymentConfig | null
+  paymentConfig?: PaymentConfig | null,
 ): ResolvedProvider {
   const ch = channel as PaymentChannel;
 
   // 支付宝系：当面付 / PC / WAP（配置与环境变量合并逻辑集中在 resolveAlipayConfig）
-  if (channel.startsWith('ALIPAY')) {
+  if (channel.startsWith("ALIPAY")) {
     const cfg = resolveAlipayConfig(paymentConfig);
     if (!cfg.usable) {
       return { provider: null, usable: false, missing: cfg.missing };
@@ -46,7 +51,7 @@ export function resolveProvider(
   }
 
   // 微信支付系：Native / H5 / JSAPI / 小程序
-  if (channel.startsWith('WECHAT')) {
+  if (channel.startsWith("WECHAT")) {
     const cfg = resolveWechatConfig(paymentConfig);
     if (!cfg.usable) {
       return { provider: null, usable: false, missing: cfg.missing };
@@ -68,9 +73,35 @@ export function resolveProvider(
   }
 
   // 银联系：网关 / WAP / 二维码
-  if (channel.startsWith('UNIONPAY')) {
-    // 当前 UnionPayProvider 仍是未签名的草稿实现，绝不能暴露为真实可用渠道。
-    return { provider: null, usable: false, missing: ['UNIONPAY_PROVIDER_NOT_IMPLEMENTED'] };
+  if (channel.startsWith("UNIONPAY")) {
+    const cfg = resolveUnionPayConfig(paymentConfig, channel);
+    if (!cfg.usable) {
+      return { provider: null, usable: false, missing: cfg.missing };
+    }
+    try {
+      return {
+        provider: new UnionPayProvider({
+          merId: cfg.merId,
+          signCertPath: cfg.signCertPath,
+          signCertPassword: cfg.signCertPassword,
+          verifyCertificate: cfg.verifyCertificate,
+          verifyCertPath: cfg.verifyCertPath,
+          frontTransUrl: cfg.frontTransUrl,
+          backTransUrl: cfg.backTransUrl,
+          queryTransUrl: cfg.queryTransUrl,
+          termId: cfg.termId,
+          channel: ch,
+        }),
+        usable: true,
+        missing: [],
+      };
+    } catch {
+      return {
+        provider: null,
+        usable: false,
+        missing: ["UNIONPAY_CERTIFICATE_INVALID_OR_UNREADABLE"],
+      };
+    }
   }
 
   // 未来 ANTOM_* / CHINAUMS_* / LAKALA_* Adapter 在此统一插入

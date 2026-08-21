@@ -56,22 +56,22 @@ const channels = [
     name: "银联网关",
     code: "UNIONPAY_GATEWAY",
     category: "银联",
-    status: "draft",
-    desc: "Provider 尚未完成签名、查单与验签",
+    status: "ready",
+    desc: "ACP 5.1 网关支付、查单、通知验签与退款",
   },
   {
     name: "银联WAP",
     code: "UNIONPAY_WAP",
     category: "银联",
-    status: "draft",
-    desc: "Provider 尚未完成签名、查单与验签",
+    status: "ready",
+    desc: "ACP 5.1 手机网页支付、查单、通知验签与退款",
   },
   {
     name: "银联二维码",
     code: "UNIONPAY_QR",
     category: "银联",
-    status: "draft",
-    desc: "Provider 尚未完成签名、查单与验签",
+    status: "ready",
+    desc: "云闪付主扫二维码、查单、通知验签与退款",
   },
   {
     name: "拉卡拉聚合",
@@ -167,9 +167,8 @@ export default function AdminChannelsPage() {
           接入真实支付通道
         </h3>
         <p className="text-blue-700 text-sm mb-3">
-          支付宝与微信支付已具备 fail-closed
-          代码链路，但仍需真实商户凭据与平台证书；银联和拉卡拉 Provider
-          尚未完成。
+          支付宝、微信支付与银联已具备 fail-closed
+          代码链路，但仍需真实商户凭据与平台证书；拉卡拉 Provider 尚未完成。
         </p>
         <div className="text-blue-600 text-xs space-y-1">
           <p>支付宝：需要 AppID、应用私钥、支付宝平台公钥或证书</p>
@@ -177,7 +176,7 @@ export default function AdminChannelsPage() {
             微信支付：需要 AppID、商户号、APIv3
             Key、商户私钥/序列号、微信平台公钥/序列号
           </p>
-          <p>银联：当前禁止真实下单，待完成官方签名、查单、退款与通知验签</p>
+          <p>银联：需要商户号、PKCS#12 签名证书/密码和银联验签证书</p>
           <p>拉卡拉：当前尚无 Provider Adapter</p>
         </div>
       </div>
