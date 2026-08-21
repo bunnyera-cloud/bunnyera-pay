@@ -14,10 +14,15 @@ const createQRSchema = z.object({
 });
 
 // 生成二维码编号
+// 随机段使用无歧义字符集（去除 I/O/0/1），避免人工抄录或扫码识别时 O/0、I/1 混淆导致访问错误 code
 function generateQRCode(): string {
   const now = new Date();
   const date = now.toISOString().slice(0, 10).replace(/-/g, '');
-  const rand = Math.random().toString(36).substring(2, 8).toUpperCase();
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let rand = '';
+  for (let i = 0; i < 6; i++) {
+    rand += alphabet[Math.floor(Math.random() * alphabet.length)];
+  }
   return `QR${date}${rand}`;
 }
 

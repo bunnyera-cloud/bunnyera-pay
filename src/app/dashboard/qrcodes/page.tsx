@@ -61,10 +61,10 @@ export default function QRCodesPage() {
       }
       if (storeRes.ok) {
         const json = await storeRes.json();
-        // Flatten stores from brands
+        // Flatten stores from brands（API 返回 brands[].stores[] 嵌套结构，展平时携带所属品牌名）
         const allStores: Store[] = [];
-        json.data.forEach((brand: { stores: Store[] }) => {
-          brand.stores.forEach((s: Store) => allStores.push(s));
+        json.data.forEach((brand: { name?: string; stores?: Store[] }) => {
+          (brand.stores || []).forEach((s: Store) => allStores.push({ ...s, brand: { name: brand.name || '未命名品牌' } }));
         });
         setStores(allStores);
       }
@@ -231,7 +231,7 @@ export default function QRCodesPage() {
             >
               <option value="">请选择分店</option>
               {stores.map(s => (
-                <option key={s.id} value={s.id}>{s.brand.name} - {s.name}</option>
+                <option key={s.id} value={s.id}>{s.brand?.name || '未命名品牌'} - {s.name}</option>
               ))}
             </Select>
           </div>

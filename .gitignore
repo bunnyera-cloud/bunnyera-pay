@@ -10,6 +10,7 @@ out/
 # Build
 build/
 dist/
+*.tsbuildinfo
 
 # Environment variables (never commit)
 .env
