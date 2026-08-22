@@ -6,6 +6,7 @@ import { resolveProvider } from "@/lib/payment/resolver";
 import { sanitizePaymentPayload } from "@/lib/payment/sanitize";
 import { syncChannelRefund } from "@/lib/payment/refund-service";
 import { recordAuditLog } from "@/lib/audit";
+import { settleVerifiedPayment } from "@/lib/payment/transitions";
 
 // 银联全渠道后台通知：表单原文取值后先验签，再做金额、商户和订单归属校验。
 export async function POST(request: NextRequest): Promise<NextResponse> {
@@ -60,7 +61,9 @@ async function handlePayment(
       isActive: true,
     },
   });
-  const resolved = resolveProvider(order.channel, paymentConfig);
+  const resolved = resolveProvider(order.channel, paymentConfig, {
+    purpose: "EXISTING_ORDER",
+  });
   if (!resolved.provider || !resolved.usable) {
     await markCallbackError(callbackLog.id, "银联支付渠道配置不完整，无法验签");
     return unionPayResponse("fail", 503);
@@ -111,26 +114,13 @@ async function handlePayment(
   }
 
   await prisma.$transaction(async (tx) => {
-    const claimed = await tx.order.updateMany({
-      where: { id: order.id, status: { in: ["CREATED", "PAYING"] } },
-      data: {
-        status: "PAID",
-        channelTradeNo: callback.tradeNo,
-        paidAt: callback.paidAt || new Date(),
-        callbackRaw: sanitizedBody,
-        callbackCount: { increment: 1 },
-      },
-    });
-    if (claimed.count === 0) return;
-    await tx.paymentRecord.create({
-      data: {
-        orderId: order.id,
-        amount: (callback.amount / 100).toFixed(2),
-        channel: order.channel,
-        channelTradeNo: callback.tradeNo,
-        status: "SUCCESS",
-        rawData: sanitizedBody,
-      },
+    await settleVerifiedPayment(tx, {
+      orderId: order.id,
+      amount: (callback.amount / 100).toFixed(2),
+      channel: order.channel,
+      tradeNo: callback.tradeNo,
+      paidAt: callback.paidAt || new Date(),
+      rawData: sanitizedBody,
     });
   });
   await prisma.callbackLog.update({
@@ -181,7 +171,9 @@ async function handleRefund(
       isActive: true,
     },
   });
-  const resolved = resolveProvider(refund.order.channel, paymentConfig);
+  const resolved = resolveProvider(refund.order.channel, paymentConfig, {
+    purpose: "EXISTING_ORDER",
+  });
   if (!resolved.provider?.handleRefundWebhook || !resolved.usable) {
     await markCallbackError(callbackLog.id, "银联支付渠道配置不完整，无法验签");
     return unionPayResponse("fail", 503);

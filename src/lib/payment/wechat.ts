@@ -222,6 +222,7 @@ export class WechatPayProvider implements PaymentProvider {
 
       return {
         status: statusMap[result.trade_state || ''] || 'UNKNOWN',
+        verified: true,
         amount: result.amount?.total,
         tradeNo: result.transaction_id,
         paidAt: result.success_time ? new Date(result.success_time) : undefined,

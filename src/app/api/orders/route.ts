@@ -66,16 +66,26 @@ export async function POST(request: NextRequest) {
     if (contextError) return errorResponse(contextError, 400);
 
     // 获取支付配置；无真实可用 Provider 时在创建订单前明确失败
-    const paymentConfig = await prisma.paymentConfig.findFirst({
-      where: { merchantId, channel: data.channel, isActive: true },
-    });
+    const [paymentConfig, merchantChannel] = await Promise.all([
+      prisma.paymentConfig.findFirst({
+        where: { merchantId, channel: data.channel, isActive: true },
+      }),
+      prisma.merchantChannel.findUnique({
+        where: {
+          merchantId_channel: { merchantId, channel: data.channel },
+        },
+        select: { isEnabled: true },
+      }),
+    ]);
     if (!paymentConfig) {
       return errorResponse('该支付渠道尚未配置或未启用', 400);
     }
     if (!data.channel.startsWith('ALIPAY') && !data.channel.startsWith('WECHAT') && !data.channel.startsWith('UNIONPAY')) {
       return errorResponse(`不支持的支付渠道: ${data.channel}`, 400);
     }
-    const resolved = resolveProvider(data.channel, paymentConfig);
+    const resolved = resolveProvider(data.channel, paymentConfig, {
+      merchantChannel,
+    });
     if (!resolved.provider || !resolved.usable) {
       return errorResponse(`支付渠道不可用: ${resolved.missing.join(', ')}`, 400);
     }

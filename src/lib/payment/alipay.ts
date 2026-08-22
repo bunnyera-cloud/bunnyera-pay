@@ -94,7 +94,7 @@ export class AlipayProvider implements PaymentProvider {
       method,
       charset: 'utf-8',
       sign_type: 'RSA2',
-      timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
+      timestamp: formatAlipayTimestamp(),
       version: '1.0',
       biz_content: JSON.stringify(bizContent),
     };
@@ -224,6 +224,7 @@ export class AlipayProvider implements PaymentProvider {
         };
         return {
           status: statusMap[response.trade_status] || 'UNKNOWN',
+          verified: true,
           amount: amountToFen(response.total_amount),
           tradeNo: response.trade_no,
         };
@@ -354,6 +355,26 @@ export class AlipayProvider implements PaymentProvider {
       return { verified: false, error: `回调解析失败: ${(error as Error).message}` };
     }
   }
+}
+
+/** 支付宝网关时间必须使用 Asia/Shanghai 的 yyyy-MM-dd HH:mm:ss。 */
+export function formatAlipayTimestamp(date = new Date()): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date);
+  const values = Object.fromEntries(
+    parts
+      .filter(part => part.type !== 'literal')
+      .map(part => [part.type, part.value])
+  );
+  return `${values.year}-${values.month}-${values.day} ${values.hour}:${values.minute}:${values.second}`;
 }
 
 function mapAlipayError(

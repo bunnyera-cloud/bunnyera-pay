@@ -86,6 +86,8 @@ export interface QueryOrderParams {
 
 export interface OrderQueryResult {
   status: 'PAID' | 'UNPAID' | 'CLOSED' | 'REFUNDED' | 'UNKNOWN';
+  /** Provider 已对本次官方 API 响应完成验签；主动入账必须严格为 true */
+  verified?: boolean;
   /** 渠道返回金额，整数最小货币单位；CNY 为分 */
   amount?: number;
   tradeNo?: string;

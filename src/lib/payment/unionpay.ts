@@ -165,6 +165,7 @@ export class UnionPayProvider implements PaymentProvider {
         return { status: "UNKNOWN" };
       return {
         status: "PAID",
+        verified: true,
         amount,
         tradeNo: response.queryId,
         paidAt: parseUnionPayTime(response.traceTime || response.txnTime),

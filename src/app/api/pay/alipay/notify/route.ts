@@ -5,6 +5,7 @@ import { recordAuditLog } from '@/lib/audit';
 import { resolveProvider } from '@/lib/payment/resolver';
 import { amountToFen } from '@/lib/payment/config';
 import { sanitizePaymentPayload } from '@/lib/payment/sanitize';
+import { settleVerifiedPayment } from '@/lib/payment/transitions';
 
 // 支付宝回调通知处理
 // 统一 Webhook contract：读取请求 -> resolve provider -> provider.handleWebhook() -> 幂等更新
@@ -69,7 +70,9 @@ export async function POST(request: NextRequest) {
       return new NextResponse('fail', { status: 200 });
     }
 
-    const resolved = resolveProvider(order.channel, paymentConfig);
+    const resolved = resolveProvider(order.channel, paymentConfig, {
+      purpose: 'EXISTING_ORDER',
+    });
     if (!resolved.provider || !resolved.usable) {
       await prisma.callbackLog.update({
         where: { id: callbackLog.id },
@@ -131,28 +134,13 @@ export async function POST(request: NextRequest) {
 
     // 更新订单状态：条件更新是并发执行权锁，只有一个重复回调能创建支付记录。
     await prisma.$transaction(async (tx) => {
-      const claimed = await tx.order.updateMany({
-        where: { id: order.id, status: { in: ['CREATED', 'PAYING'] } },
-        data: {
-          status: 'PAID',
-          channelTradeNo: callbackData.tradeNo,
-          paidAt: callbackData.paidAt || new Date(),
-          callbackRaw: sanitizedBody,
-          callbackCount: { increment: 1 },
-        },
-      });
-      if (claimed.count === 0) return;
-
-      // 记录支付记录
-      await tx.paymentRecord.create({
-        data: {
-          orderId: order.id,
-          amount: (callbackData.amount / 100).toFixed(2),
-          channel: order.channel,
-          channelTradeNo: callbackData.tradeNo,
-          status: 'SUCCESS',
-          rawData: sanitizedBody,
-        },
+      await settleVerifiedPayment(tx, {
+        orderId: order.id,
+        amount: (callbackData.amount / 100).toFixed(2),
+        channel: order.channel,
+        tradeNo: callbackData.tradeNo,
+        paidAt: callbackData.paidAt || new Date(),
+        rawData: sanitizedBody,
       });
     });
 

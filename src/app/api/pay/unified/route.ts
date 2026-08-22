@@ -3,7 +3,12 @@ import prisma from '@/lib/db';
 import { withAuth, successResponse, errorResponse } from '@/lib/api-utils';
 import { generateOrderNo } from '@/lib/auth';
 import { resolveProvider } from '@/lib/payment/resolver';
-import { resolveAlipayNotifyUrl, resolveBaseUrl, resolvePaymentEnv } from '@/lib/payment/config';
+import {
+  canCallPaymentProvider,
+  resolveAlipayNotifyUrl,
+  resolveBaseUrl,
+  resolvePaymentEnv,
+} from '@/lib/payment/config';
 import { z } from 'zod';
 import Decimal from 'decimal.js';
 import { validateOrderContext } from '@/lib/payment/order-context';
@@ -60,14 +65,29 @@ export async function POST(request: NextRequest) {
 
     const contextError = await validateOrderContext(merchantId, data);
     if (contextError) return errorResponse(contextError, 400);
+    const paymentEnv = resolvePaymentEnv();
 
     // 指定渠道：先确认渠道配置可用（fail-closed），再创建订单，绝不创建 demo 订单
     if (data.channel) {
-      const paymentConfig = await prisma.paymentConfig.findFirst({
-        where: { merchantId, channel: data.channel, isActive: true },
-      });
+      // PREVIEW 只用于静态演示，统一支付接口绝不实例化或调用真实 Provider。
+      if (!canCallPaymentProvider(paymentEnv)) {
+        return errorResponse("PREVIEW 环境禁止发起真实支付", 409);
+      }
+      const [paymentConfig, merchantChannel] = await Promise.all([
+        prisma.paymentConfig.findFirst({
+          where: { merchantId, channel: data.channel, isActive: true },
+        }),
+        prisma.merchantChannel.findUnique({
+          where: {
+            merchantId_channel: { merchantId, channel: data.channel },
+          },
+          select: { isEnabled: true },
+        }),
+      ]);
 
-      const resolved = resolveProvider(data.channel, paymentConfig);
+      const resolved = resolveProvider(data.channel, paymentConfig, {
+        merchantChannel,
+      });
       if (!paymentConfig || !resolved.provider || !resolved.usable) {
         return errorResponse(
           `支付渠道不可用: ${resolved.missing.join(', ') || '该渠道尚未配置'}`,
@@ -105,7 +125,6 @@ export async function POST(request: NextRequest) {
       // 调用真实支付渠道
       try {
         const baseUrl = resolveBaseUrl(req.headers);
-        const paymentEnv = resolvePaymentEnv();
         const notifyUrl = data.channel.startsWith('ALIPAY')
           ? resolveAlipayNotifyUrl(req.headers, paymentConfig.notifyUrl)
           : data.channel.startsWith('WECHAT')
@@ -155,12 +174,26 @@ export async function POST(request: NextRequest) {
     }
 
     // 未指定渠道：返回商户已配置且可用的渠道列表；无任何配置时返回明确业务错误
-    const configs = await prisma.paymentConfig.findMany({
-      where: { merchantId, isActive: true },
-    });
+    const [configs, merchantChannels] = await Promise.all([
+      prisma.paymentConfig.findMany({
+        where: { merchantId, isActive: true },
+      }),
+      prisma.merchantChannel.findMany({
+        where: { merchantId, isEnabled: true },
+        select: { channel: true, isEnabled: true },
+      }),
+    ]);
+    const enabledChannels = new Map(
+      merchantChannels.map((item) => [item.channel, item]),
+    );
 
     const availableChannels = configs
-      .filter(c => resolveProvider(c.channel, c).usable)
+      .filter(
+        (c) =>
+          resolveProvider(c.channel, c, {
+            merchantChannel: enabledChannels.get(c.channel),
+          }).usable,
+      )
       .map(c => ({
         channel: c.channel,
         channelName: getChannelName(c.channel),

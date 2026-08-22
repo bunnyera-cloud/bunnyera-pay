@@ -37,22 +37,32 @@ export function resolvePaymentEnv(): PaymentEnv {
   return "PREVIEW";
 }
 
+/** PREVIEW is presentation-only and must never execute external payment APIs. */
+export function canCallPaymentProvider(env = resolvePaymentEnv()): boolean {
+  return env !== "PREVIEW";
+}
+
 /**
  * 站点 Base URL。修复历史问题 notify_url=null/api/pay/notify/alipay：
  * 优先 APP_BASE_URL，其次请求头推导，最后正式域名兜底，绝不返回 "null"。
  */
 export function resolveBaseUrl(headers?: Headers): string {
   const configured = (process.env.APP_BASE_URL || "").trim();
+  if (resolvePaymentEnv() === "PRODUCTION") {
+    const productionUrl = normalizeHttpsUrl(configured);
+    if (!productionUrl) {
+      throw new Error(
+        "PAYMENT_ENV=PRODUCTION 时 APP_BASE_URL 必须是有效的 HTTPS URL",
+      );
+    }
+    return productionUrl;
+  }
   if (
     /^https?:\/\//i.test(configured) &&
     configured !== "null" &&
     configured !== "undefined"
   ) {
     return configured.replace(/\/+$/, "");
-  }
-  // 生产环境不信任可被客户端伪造的 Host / X-Forwarded-Host。
-  if (resolvePaymentEnv() === "PRODUCTION") {
-    return "https://pay.bunnyera.com";
   }
   if (headers) {
     const host = headers.get("x-forwarded-host") || headers.get("host");
@@ -69,6 +79,13 @@ export function resolveAlipayNotifyUrl(
   configured?: string | null,
 ): string {
   const fromConfig = (configured || process.env.ALIPAY_NOTIFY_URL || "").trim();
+  if (resolvePaymentEnv() === "PRODUCTION" && fromConfig) {
+    const productionUrl = normalizeHttpsUrl(fromConfig);
+    if (!productionUrl) {
+      throw new Error("生产环境 ALIPAY_NOTIFY_URL 必须是有效的 HTTPS URL");
+    }
+    return productionUrl;
+  }
   const allowedProtocol =
     resolvePaymentEnv() === "PRODUCTION" ? /^https:\/\//i : /^https?:\/\//i;
   if (
@@ -79,6 +96,24 @@ export function resolveAlipayNotifyUrl(
     return fromConfig;
   }
   return `${resolveBaseUrl(headers)}/api/pay/alipay/notify`;
+}
+
+function normalizeHttpsUrl(raw: string): string | null {
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw);
+    if (
+      parsed.protocol !== "https:" ||
+      !parsed.hostname ||
+      parsed.username ||
+      parsed.password
+    ) {
+      return null;
+    }
+    return parsed.toString().replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
 }
 
 export interface ResolvedAlipayConfig {

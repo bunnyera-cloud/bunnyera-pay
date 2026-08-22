@@ -1,4 +1,8 @@
-import type { PaymentChannel, PaymentConfig } from "@prisma/client";
+import type {
+  MerchantChannel,
+  PaymentChannel,
+  PaymentConfig,
+} from "@prisma/client";
 import type { PaymentProvider } from "./provider";
 import { AlipayProvider } from "./alipay";
 import { WechatPayProvider } from "./wechat";
@@ -16,6 +20,15 @@ export interface ResolvedProvider {
   missing: string[];
 }
 
+export interface ResolveProviderOptions {
+  /**
+   * New payments must be explicitly enabled by the platform. Existing orders
+   * still need callbacks/refunds after an administrator disables new traffic.
+   */
+  purpose?: "NEW_PAYMENT" | "EXISTING_ORDER";
+  merchantChannel?: Pick<MerchantChannel, "isEnabled"> | null;
+}
+
 /**
  * Provider 实例化唯一入口。
  * 业务层（cashier / unified / orders / close / sync / refunds / notify）
@@ -25,8 +38,26 @@ export interface ResolvedProvider {
 export function resolveProvider(
   channel: PaymentChannel | string,
   paymentConfig?: PaymentConfig | null,
+  options: ResolveProviderOptions = {},
 ): ResolvedProvider {
   const ch = channel as PaymentChannel;
+  if (!paymentConfig?.isActive) {
+    return {
+      provider: null,
+      usable: false,
+      missing: ["PAYMENT_CONFIG_INACTIVE"],
+    };
+  }
+  if (
+    (options.purpose || "NEW_PAYMENT") === "NEW_PAYMENT" &&
+    options.merchantChannel?.isEnabled !== true
+  ) {
+    return {
+      provider: null,
+      usable: false,
+      missing: ["MERCHANT_CHANNEL_DISABLED"],
+    };
+  }
 
   // 支付宝系：当面付 / PC / WAP（配置与环境变量合并逻辑集中在 resolveAlipayConfig）
   if (channel.startsWith("ALIPAY")) {

@@ -2,6 +2,7 @@ import prisma from "@/lib/db";
 import { resolveProvider } from "./resolver";
 import { recordAuditLog } from "@/lib/audit";
 import { amountToFen, resolveBaseUrl } from "./config";
+import { validateRefundSuccessAmount } from "./transitions";
 
 // 退款执行结果：ok=false 时订单绝不被标记为退款成功（fail-closed）
 export interface RefundExecution {
@@ -87,7 +88,9 @@ export async function executeChannelRefund(
       isActive: true,
     },
   });
-  const resolved = resolveProvider(order.channel, paymentConfig);
+  const resolved = resolveProvider(order.channel, paymentConfig, {
+    purpose: "EXISTING_ORDER",
+  });
   if (!resolved.provider || !resolved.usable) {
     await prisma.refund.updateMany({
       where: { id: refund.id, status: "PROCESSING" },
@@ -154,8 +157,10 @@ export async function executeChannelRefund(
     queryStatus = query.status;
     if (
       queryStatus === "SUCCESS" &&
-      query.refundAmount !== undefined &&
-      query.refundAmount !== amountToFen(refund.amount.toString())
+      validateRefundSuccessAmount(
+        query,
+        amountToFen(refund.amount.toString()),
+      )
     ) {
       queryStatus = "UNKNOWN";
     }
@@ -291,7 +296,9 @@ export async function syncChannelRefund(
       isActive: true,
     },
   });
-  const resolved = resolveProvider(refund.order.channel, paymentConfig);
+  const resolved = resolveProvider(refund.order.channel, paymentConfig, {
+    purpose: "EXISTING_ORDER",
+  });
   if (!resolved.provider || !resolved.usable) {
     return {
       ok: false,
@@ -338,11 +345,12 @@ export async function syncChannelRefund(
   }
 
   const expectedFen = amountToFen(refund.amount.toString());
-  if (query.refundAmount !== undefined && query.refundAmount !== expectedFen) {
+  const refundValidationError = validateRefundSuccessAmount(query, expectedFen);
+  if (refundValidationError) {
     return {
       ok: false,
       refundStatus: "PROCESSING",
-      error: "官方退款金额与退款单不一致，已拒绝更新",
+      error: `${refundValidationError}，已拒绝更新`,
       orderUpdated: false,
     };
   }

@@ -6,6 +6,7 @@ import { resolveProvider } from '@/lib/payment/resolver';
 import { amountToFen } from '@/lib/payment/config';
 import { sanitizePaymentPayload } from '@/lib/payment/sanitize';
 import { syncChannelRefund } from '@/lib/payment/refund-service';
+import { settleVerifiedPayment } from '@/lib/payment/transitions';
 
 // 微信支付回调通知处理
 // 统一 Webhook contract：读取请求 -> resolve provider -> provider.handleWebhook() -> 幂等更新
@@ -40,7 +41,9 @@ export async function POST(request: NextRequest) {
     });
 
     for (const config of configs) {
-      const resolved = resolveProvider(config.channel, config);
+      const resolved = resolveProvider(config.channel, config, {
+        purpose: 'EXISTING_ORDER',
+      });
       if (!resolved.provider || !resolved.usable) continue;
 
       const eventType = (body as { event_type?: string }).event_type || '';
@@ -170,27 +173,13 @@ export async function POST(request: NextRequest) {
       // 更新订单状态（事务保证原子性，并发安全）
       if (callbackData.status === 'SUCCESS') {
         await prisma.$transaction(async (tx) => {
-          const claimed = await tx.order.updateMany({
-            where: { id: order.id, status: { in: ['CREATED', 'PAYING'] } },
-            data: {
-              status: 'PAID',
-              channelTradeNo: callbackData.tradeNo,
-              paidAt: callbackData.paidAt || new Date(),
-              callbackRaw: sanitizedBody,
-              callbackCount: { increment: 1 },
-            },
-          });
-          if (claimed.count === 0) return;
-
-          await tx.paymentRecord.create({
-            data: {
-              orderId: order.id,
-              amount: (callbackData.amount / 100).toFixed(2),
-              channel: order.channel,
-              channelTradeNo: callbackData.tradeNo,
-              status: 'SUCCESS',
-              rawData: sanitizedBody,
-            },
+          await settleVerifiedPayment(tx, {
+            orderId: order.id,
+            amount: (callbackData.amount / 100).toFixed(2),
+            channel: order.channel,
+            tradeNo: callbackData.tradeNo,
+            paidAt: callbackData.paidAt || new Date(),
+            rawData: sanitizedBody,
           });
         });
 

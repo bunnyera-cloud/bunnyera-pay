@@ -25,7 +25,9 @@ export async function POST(
       const paymentConfig = await prisma.paymentConfig.findFirst({
         where: { merchantId: order.merchantId, channel: order.channel, isActive: true },
       });
-      const resolved = resolveProvider(order.channel, paymentConfig);
+      const resolved = resolveProvider(order.channel, paymentConfig, {
+        purpose: 'EXISTING_ORDER',
+      });
       if (!resolved.provider || !resolved.usable) {
         return errorResponse('支付渠道配置不完整，无法安全关闭官方订单', 503);
       }

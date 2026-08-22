@@ -4,6 +4,10 @@ import { withAuth, successResponse, errorResponse } from "@/lib/api-utils";
 import { resolveProvider } from "@/lib/payment/resolver";
 import { amountToFen } from "@/lib/payment/config";
 import { recordAuditLog } from "@/lib/audit";
+import {
+  settleVerifiedPayment,
+  validatePaidQueryTransition,
+} from "@/lib/payment/transitions";
 
 // 主动向官方渠道查单补偿（不依赖回调）
 export async function POST(
@@ -50,7 +54,9 @@ export async function POST(
           isActive: true,
         },
       });
-      const resolved = resolveProvider(order.channel, paymentConfig);
+      const resolved = resolveProvider(order.channel, paymentConfig, {
+        purpose: "EXISTING_ORDER",
+      });
       if (!resolved.provider || !resolved.usable) {
         return errorResponse("支付渠道配置不完整，无法执行官方查单", 503);
       }
@@ -64,32 +70,20 @@ export async function POST(
         result.status === "PAID" &&
         (order.status === "CREATED" || order.status === "PAYING")
       ) {
-        // 金额一致性校验 — 使用整数分精确比较，禁止 JS 浮点
-        if (result.amount !== undefined) {
-          const orderAmountFen = amountToFen(order.amount.toString());
-          const queryAmountFen = result.amount; // Provider 统一返回整数最小货币单位
-          if (orderAmountFen !== queryAmountFen) {
-            return errorResponse("查询结果金额与订单不一致，已拒绝更新", 409);
-          }
+        const transitionError = validatePaidQueryTransition(result, {
+          expectedAmountFen: amountToFen(order.amount.toString()),
+          existingTradeNo: order.channelTradeNo,
+        });
+        if (transitionError) {
+          return errorResponse(`${transitionError}，已拒绝更新`, 409);
         }
         await prisma.$transaction(async (tx) => {
-          const claimed = await tx.order.updateMany({
-            where: { id: order.id, status: { in: ["CREATED", "PAYING"] } },
-            data: {
-              status: "PAID",
-              paidAt: result.paidAt || new Date(),
-              channelTradeNo: result.tradeNo ?? order.channelTradeNo,
-            },
-          });
-          if (claimed.count === 0) return;
-          await tx.paymentRecord.create({
-            data: {
-              orderId: order.id,
-              amount: order.amount,
-              channel: order.channel,
-              channelTradeNo: result.tradeNo ?? null,
-              status: "SUCCESS",
-            },
+          await settleVerifiedPayment(tx, {
+            orderId: order.id,
+            amount: order.amount,
+            channel: order.channel,
+            tradeNo: result.tradeNo!,
+            paidAt: result.paidAt || new Date(),
           });
         });
         await recordAuditLog({

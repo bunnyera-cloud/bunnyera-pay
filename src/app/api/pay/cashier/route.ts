@@ -99,14 +99,27 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   // 渠道配置校验（fail closed：未配置/不可用一律拒绝）
   // Provider 实例化统一通过 resolveProvider 收口
-  const paymentConfig = await prisma.paymentConfig.findFirst({
-    where: { merchantId: merchant.id, channel: data.channel, isActive: true },
-  });
+  const [paymentConfig, merchantChannel] = await Promise.all([
+    prisma.paymentConfig.findFirst({
+      where: { merchantId: merchant.id, channel: data.channel, isActive: true },
+    }),
+    prisma.merchantChannel.findUnique({
+      where: {
+        merchantId_channel: {
+          merchantId: merchant.id,
+          channel: data.channel,
+        },
+      },
+      select: { isEnabled: true },
+    }),
+  ]);
   if (!paymentConfig) {
     return errorResponse('该支付方式未开通', 400);
   }
 
-  const resolved = resolveProvider(data.channel, paymentConfig);
+  const resolved = resolveProvider(data.channel, paymentConfig, {
+    merchantChannel,
+  });
   if (!resolved.provider || !resolved.usable) {
     return errorResponse('该支付方式未开通', 400);
   }
@@ -122,6 +135,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
           merchantId: merchant.id,
           brandId: store.brandId,
           storeId: store.id,
+          departmentId: qrCode.departmentId,
+          counterId: qrCode.counterId,
           qrcodeId: qrCode.id,
           subject: qrCode.name || `${merchant.companyName}收款`,
           amount,

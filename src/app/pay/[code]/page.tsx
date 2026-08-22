@@ -74,16 +74,34 @@ export default async function PayPage({ params }: PayPageProps) {
 
   // 计算该商户真实可用的收银渠道（已启用 + 配置完整）
   const paymentEnv = resolvePaymentEnv();
-  const configs = await prisma.paymentConfig.findMany({
-    where: {
-      merchantId: qrCode.merchantId,
-      isActive: true,
-      channel: { in: ["ALIPAY_BAR", "WECHAT_NATIVE", "UNIONPAY_QR"] },
-    },
-  });
+  const [configs, merchantChannels] = await Promise.all([
+    prisma.paymentConfig.findMany({
+      where: {
+        merchantId: qrCode.merchantId,
+        isActive: true,
+        channel: { in: ["ALIPAY_BAR", "WECHAT_NATIVE", "UNIONPAY_QR"] },
+      },
+    }),
+    prisma.merchantChannel.findMany({
+      where: {
+        merchantId: qrCode.merchantId,
+        isEnabled: true,
+        channel: { in: ["ALIPAY_BAR", "WECHAT_NATIVE", "UNIONPAY_QR"] },
+      },
+      select: { channel: true, isEnabled: true },
+    }),
+  ]);
+  const enabledChannels = new Map(
+    merchantChannels.map((item) => [item.channel, item]),
+  );
 
   const channels = configs
-    .filter((c) => resolveProvider(c.channel, c).usable)
+    .filter(
+      (c) =>
+        resolveProvider(c.channel, c, {
+          merchantChannel: enabledChannels.get(c.channel),
+        }).usable,
+    )
     .map((c) => ({
       channel: c.channel,
       name: CHANNEL_META[c.channel]?.name || c.channel,

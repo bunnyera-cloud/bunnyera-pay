@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import test from "node:test";
-import { amountToFen, normalizePrivateKey, normalizePublicKey } from "./config";
+import type { PaymentConfig } from "@prisma/client";
+import {
+  amountToFen,
+  canCallPaymentProvider,
+  normalizePrivateKey,
+  normalizePublicKey,
+  resolveBaseUrl,
+} from "./config";
 import { decryptPaymentSecret, encryptPaymentSecret } from "./secret-storage";
 import { sanitizePaymentPayload } from "./sanitize";
 import { resolveProvider } from "./resolver";
@@ -55,11 +62,50 @@ test("payment payload sanitizer redacts signatures and payer identifiers", () =>
 });
 
 test("UnionPay adapter remains fail-closed without official credentials", () => {
-  const result = resolveProvider("UNIONPAY_QR", null);
+  const result = resolveProvider(
+    "UNIONPAY_QR",
+    { isActive: true, isSandbox: false } as PaymentConfig,
+    { merchantChannel: { isEnabled: true } },
+  );
   assert.equal(result.usable, false);
   assert.equal(result.provider, null);
   assert.ok(result.missing.includes("UNIONPAY_MER_ID"));
   assert.ok(result.missing.includes("UNIONPAY_SIGN_CERT_PATH"));
   assert.ok(result.missing.includes("UNIONPAY_SIGN_CERT_PASSWORD"));
   assert.ok(result.missing.includes("UNIONPAY_VERIFY_CERTIFICATE_OR_PATH"));
+});
+
+test("disabled MerchantChannel is rejected before provider creation", () => {
+  const result = resolveProvider(
+    "WECHAT_NATIVE",
+    { isActive: true, isSandbox: false } as PaymentConfig,
+    { merchantChannel: { isEnabled: false } },
+  );
+  assert.equal(result.usable, false);
+  assert.equal(result.provider, null);
+  assert.deepEqual(result.missing, ["MERCHANT_CHANNEL_DISABLED"]);
+});
+
+test("PREVIEW environment never permits provider calls", () => {
+  assert.equal(canCallPaymentProvider("PREVIEW"), false);
+  assert.equal(canCallPaymentProvider("SANDBOX"), true);
+  assert.equal(canCallPaymentProvider("PRODUCTION"), true);
+});
+
+test("production rejects an HTTP APP_BASE_URL", () => {
+  const previousEnv = process.env.PAYMENT_ENV;
+  const previousBaseUrl = process.env.APP_BASE_URL;
+  process.env.PAYMENT_ENV = "PRODUCTION";
+  process.env.APP_BASE_URL = "http://pay.example.com";
+  try {
+    assert.throws(
+      () => resolveBaseUrl(),
+      /APP_BASE_URL 必须是有效的 HTTPS URL/,
+    );
+  } finally {
+    if (previousEnv === undefined) delete process.env.PAYMENT_ENV;
+    else process.env.PAYMENT_ENV = previousEnv;
+    if (previousBaseUrl === undefined) delete process.env.APP_BASE_URL;
+    else process.env.APP_BASE_URL = previousBaseUrl;
+  }
 });
