@@ -25,6 +25,14 @@ enum MerchantStatus {
   TERMINATED        // 已终止
 }
 
+// KYB 与运营状态独立：未批准不能启用真实收款，但不阻止门店/收款码/后台基础功能
+enum KybStatus {
+  NOT_SUBMITTED
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 enum OrderStatus {
   CREATED           // 已创建
   PAYING            // 支付中
@@ -62,6 +70,8 @@ enum PaymentChannel {
   MASTERCARD        // Mastercard
   ANTOM             // Antom 跨境
   PAYPAL            // PayPal
+  ABA_PAYWAY        // ABA PayWay（柬埔寨，凭证待开通时保持 fail-closed）
+  WECHAT_EXTERNAL_QR // 微信外部静态收款码（展示/跳转，人工确认，不走微信支付 API）
 }
 
 enum PaymentScene {
@@ -191,6 +201,11 @@ model Merchant {
   agreementAccepted   Boolean        @default(false)
   agreementVersion    String?
 
+  kybStatus           KybStatus      @default(NOT_SUBMITTED)
+  kybSubmittedAt      DateTime?
+  kybReviewedAt       DateTime?
+  kybRejectReason     String?
+
   createdAt           DateTime       @default(now())
   updatedAt           DateTime       @updatedAt
 
@@ -205,6 +220,7 @@ model Merchant {
   qrCodes             QRCode[]
   channels            MerchantChannel[]
   apiApps             ApiApp[]
+  externalPaymentTargets ExternalPaymentTarget[]
 
   @@map("merchants")
 }
@@ -231,8 +247,9 @@ model MerchantMember {
   sessions    MerchantSession[]
   orders      Order[]   @relation("OrderOperator")
   auditLogs   AuditLog[] @relation("MerchantMemberAudit")
+  storeAccesses MerchantMemberStore[]
 
-  @@unique([merchantId, email])
+  @@unique([email])
   @@map("merchant_members")
 }
 
@@ -281,6 +298,9 @@ model Store {
 
   brand      Brand    @relation(fields: [brandId], references: [id], onDelete: Cascade)
   departments Department[]
+  qrCodes    QRCode[]
+  memberAccesses MerchantMemberStore[]
+  externalPaymentTargets ExternalPaymentTarget[]
 
   @@unique([brandId, code])
   @@map("stores")
@@ -394,7 +414,10 @@ model Order {
   // 支付渠道返回的动态支付内容（当面付二维码内容 / 网页支付跳转 URL）
   payData           String?       @db.Text
   // 该订单创建时所处的支付环境：PRODUCTION / SANDBOX / PREVIEW
+  // PREVIEW / PRODUCTION / SANDBOX / MANUAL 环境标记
   paymentEnv        String?       @default("PREVIEW")
+  // PROVIDER = 渠道验签入账；MANUAL_CONFIRMATION_REQUIRED = 禁止自动 PAID
+  confirmationMode  String?
 
   status            OrderStatus   @default(CREATED)
   
@@ -437,6 +460,7 @@ model Order {
   @@index([merchantId, createdAt])
   @@index([merchantId, status])
   @@index([channelTradeNo])
+  @@index([qrcodeId, status])
   @@map("orders")
 }
 
@@ -508,7 +532,7 @@ model QRCode {
   type        QRCodeType
   name        String?    // 名称/描述
   
-  storeId     String?
+  storeId     String
   departmentId String?
   counterId   String?
   operatorId  String?
@@ -523,9 +547,44 @@ model QRCode {
   updatedAt   DateTime   @updatedAt
 
   merchant    Merchant   @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  store       Store      @relation(fields: [storeId], references: [id])
   orders      Order[]
 
+  @@index([merchantId, storeId])
   @@map("qr_codes")
+}
+
+model ExternalPaymentTarget {
+  id           String         @id @default(uuid())
+  merchantId   String
+  storeId      String
+  channel      PaymentChannel
+  displayName  String
+  qrImageUrl   String?        @db.Text
+  targetUrl    String?        @db.Text
+  isActive     Boolean        @default(true)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  store    Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@index([merchantId, storeId, channel])
+  @@map("external_payment_targets")
+}
+
+// 分店账号授权：总部角色不写此表（默认可看全部门店）
+model MerchantMemberStore {
+  memberId  String
+  storeId   String
+  createdAt DateTime @default(now())
+
+  member MerchantMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  store  Store          @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@id([memberId, storeId])
+  @@index([storeId])
+  @@map("merchant_member_stores")
 }
 
 // ==================== 对账 ====================

@@ -1,6 +1,6 @@
-import { PaymentChannel, PaymentScene, UserRole, OrderStatus, MerchantStatus, RefundStatus } from '@prisma/client';
+import { PaymentChannel, PaymentScene, UserRole, OrderStatus, MerchantStatus, RefundStatus, KybStatus } from '@prisma/client';
 
-export { PaymentChannel, PaymentScene, UserRole, OrderStatus, MerchantStatus, RefundStatus };
+export { PaymentChannel, PaymentScene, UserRole, OrderStatus, MerchantStatus, RefundStatus, KybStatus };
 
 // 支付渠道中文名称映射
 export const PAYMENT_CHANNEL_NAMES: Record<PaymentChannel, string> = {
@@ -20,6 +20,8 @@ export const PAYMENT_CHANNEL_NAMES: Record<PaymentChannel, string> = {
   MASTERCARD: 'Mastercard',
   ANTOM: 'Antom',
   PAYPAL: 'PayPal',
+  ABA_PAYWAY: 'ABA PayWay',
+  WECHAT_EXTERNAL_QR: '微信支付（人工确认）',
 };
 
 // 商户状态中文映射
@@ -34,6 +36,13 @@ export const MERCHANT_STATUS_NAMES: Record<MerchantStatus, string> = {
   SUSPENDED: '暂停',
   REJECTED: '已拒绝',
   TERMINATED: '已终止',
+};
+
+export const KYB_STATUS_NAMES: Record<KybStatus, string> = {
+  NOT_SUBMITTED: '未提交',
+  PENDING: '审核中',
+  APPROVED: '已通过',
+  REJECTED: '已拒绝',
 };
 
 // 订单状态中文映射
