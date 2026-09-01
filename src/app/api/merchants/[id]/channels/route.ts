@@ -21,7 +21,6 @@ const manageableChannelSchema = z.enum([
   "UNIONPAY_GATEWAY",
   "UNIONPAY_WAP",
   "UNIONPAY_QR",
-  "ABA_PAYWAY",
 ]);
 
 const channelAuthorizationSchema = z.object({

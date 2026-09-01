@@ -21,8 +21,10 @@ export const CASHIER_ROUTABLE_CHANNELS = [
   "ALIPAY_BAR",
   "WECHAT_NATIVE",
   "UNIONPAY_QR",
-  "ABA_PAYWAY",
 ] as const satisfies readonly PaymentChannel[];
+
+/** Cancelled products stay in the Prisma enum but must not be offered or loaded. */
+export const CANCELLED_CHANNELS = new Set<string>(["ABA_PAYWAY"]);
 
 export const MANUAL_CONFIRMATION_CHANNELS = new Set<string>([
   "WECHAT_EXTERNAL_QR",
@@ -38,6 +40,10 @@ export function isPendingCredentialsChannel(channel: string): boolean {
   return CHANNELS_PENDING_CREDENTIALS.has(channel);
 }
 
+export function isCancelledChannel(channel: string): boolean {
+  return CANCELLED_CHANNELS.has(channel);
+}
+
 export function isKybApproved(status: KybStatus | string | null | undefined): boolean {
   return status === "APPROVED";
 }
@@ -51,6 +57,7 @@ export function providerProductionStatus(
   channel: string,
   isEnabled: boolean,
 ): ProviderProductionStatus {
+  if (CANCELLED_CHANNELS.has(channel)) return "DISABLED";
   if (CHANNELS_PENDING_CREDENTIALS.has(channel)) return "PENDING_CREDENTIALS";
   return isEnabled ? "READY" : "DISABLED";
 }
@@ -66,6 +73,12 @@ export function canAuthorizeNewPayments(
   channel: string,
   kybStatus: KybStatus | string | null | undefined,
 ): { ok: true } | { ok: false; error: string } {
+  if (CANCELLED_CHANNELS.has(channel)) {
+    return {
+      ok: false,
+      error: "该渠道已取消（CHANNEL_CANCELLED），不能启用新支付",
+    };
+  }
   if (CHANNELS_PENDING_CREDENTIALS.has(channel)) {
     return {
       ok: false,
@@ -117,9 +130,8 @@ export function canStartNewProviderPayment(
 }
 
 export function resolveChannelNotifyPath(channel: string, baseUrl: string): string {
-  if (isManualConfirmationChannel(channel)) return "";
+  if (isManualConfirmationChannel(channel) || isCancelledChannel(channel)) return "";
   if (channel.startsWith("WECHAT")) return `${baseUrl}/api/pay/wechat/notify`;
   if (channel.startsWith("UNIONPAY")) return `${baseUrl}/api/pay/unionpay/notify`;
-  if (channel === "ABA_PAYWAY") return `${baseUrl}/api/pay/aba-payway/notify`;
   return `${baseUrl}/api/pay/alipay/notify`;
 }

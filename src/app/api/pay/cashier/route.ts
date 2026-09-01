@@ -30,7 +30,7 @@ const cashierPaySchema = z.object({
     value => new Decimal(value).decimalPlaces() <= 2,
     '金额最多保留两位小数'
   ).optional(),
-  channel: z.enum(['ALIPAY_BAR', 'WECHAT_NATIVE', 'UNIONPAY_QR', 'ABA_PAYWAY', 'WECHAT_EXTERNAL_QR']),
+  channel: z.enum(['ALIPAY_BAR', 'WECHAT_NATIVE', 'UNIONPAY_QR', 'WECHAT_EXTERNAL_QR']),
 });
 
 function isDirectImageSource(value: string): boolean {
@@ -287,6 +287,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       orderNo,
       amount,
       subject: order.subject,
+      currency: 'CNY',
       notifyUrl,
     });
 

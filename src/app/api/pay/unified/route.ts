@@ -32,7 +32,6 @@ const unifiedPaySchema = z.object({
     'ALIPAY_BAR', 'ALIPAY_PC', 'ALIPAY_WAP',
     'WECHAT_NATIVE', 'WECHAT_H5', 'WECHAT_JSAPI', 'WECHAT_MINI',
     'UNIONPAY_GATEWAY', 'UNIONPAY_WAP', 'UNIONPAY_QR',
-    'ABA_PAYWAY',
   ]).optional(),
   scene: z.enum(['QR_CODE', 'CASHIER', 'ONLINE', 'H5', 'MINI_PROGRAM', 'APP']),
   brandId: z.string().optional(),
@@ -151,6 +150,7 @@ export async function POST(request: NextRequest) {
           orderNo,
           amount: data.amount,
           subject: data.subject,
+          currency: 'CNY',
           notifyUrl,
           returnUrl: data.returnUrl,
           clientIp: data.clientIp,
@@ -242,7 +242,6 @@ function getChannelName(channel: string): string {
     UNIONPAY_GATEWAY: '银联网关',
     UNIONPAY_WAP: '银联WAP',
     UNIONPAY_QR: '银联二维码',
-    ABA_PAYWAY: 'ABA PayWay',
     LAKALA_AGGREGATE: '拉卡拉聚合',
   };
   return names[channel] || channel;

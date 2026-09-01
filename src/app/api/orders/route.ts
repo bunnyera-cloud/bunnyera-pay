@@ -25,7 +25,6 @@ const createOrderSchema = z.object({
     'ALIPAY_BAR', 'ALIPAY_PC', 'ALIPAY_WAP',
     'WECHAT_NATIVE', 'WECHAT_H5', 'WECHAT_JSAPI', 'WECHAT_MINI',
     'UNIONPAY_GATEWAY', 'UNIONPAY_WAP', 'UNIONPAY_QR',
-    'ABA_PAYWAY',
   ]),
   scene: z.enum(['QR_CODE', 'CASHIER', 'ONLINE', 'H5', 'MINI_PROGRAM', 'APP']),
   brandId: z.string().optional(),
@@ -94,8 +93,7 @@ export async function POST(request: NextRequest) {
     if (
       !data.channel.startsWith('ALIPAY') &&
       !data.channel.startsWith('WECHAT') &&
-      !data.channel.startsWith('UNIONPAY') &&
-      data.channel !== 'ABA_PAYWAY'
+      !data.channel.startsWith('UNIONPAY')
     ) {
       return errorResponse(`不支持的支付渠道: ${data.channel}`, 400);
     }
@@ -105,6 +103,7 @@ export async function POST(request: NextRequest) {
     if (!resolved.provider || !resolved.usable) {
       return errorResponse(`支付渠道不可用: ${resolved.missing.join(', ')}`, 400);
     }
+
     const paymentEnv = resolvePaymentEnv();
 
     // 生成订单号
@@ -166,6 +165,7 @@ export async function POST(request: NextRequest) {
         orderNo,
         amount: data.amount,
         subject: data.subject,
+        currency: 'CNY',
         notifyUrl,
         returnUrl: data.returnUrl,
         clientIp: data.clientIp,

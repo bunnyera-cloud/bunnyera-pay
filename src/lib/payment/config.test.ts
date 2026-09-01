@@ -75,7 +75,7 @@ test("UnionPay adapter remains fail-closed without official credentials", () => 
   assert.ok(result.missing.includes("UNIONPAY_VERIFY_CERTIFICATE_OR_PATH"));
 });
 
-test("ABA PayWay stays fail-closed without official credentials", () => {
+test("cancelled ABA PayWay is not loaded as a Provider", () => {
   const result = resolveProvider(
     "ABA_PAYWAY",
     { isActive: true, isSandbox: false } as PaymentConfig,
@@ -83,9 +83,7 @@ test("ABA PayWay stays fail-closed without official credentials", () => {
   );
   assert.equal(result.usable, false);
   assert.equal(result.provider, null);
-  assert.ok(result.missing.includes("ABA_PAYWAY_MERCHANT_ID"));
-  assert.ok(result.missing.includes("ABA_PAYWAY_API_KEY"));
-  assert.ok(result.missing.includes("ABA_PAYWAY_RSA_PUBLIC_KEY"));
+  assert.deepEqual(result.missing, ["CHANNEL_CANCELLED"]);
 });
 
 test("unwired channels such as Oceanpayment stay fail-closed", () => {

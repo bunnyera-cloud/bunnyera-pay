@@ -12,10 +12,9 @@ import {
   resolveUnionPayConfig,
   resolveWechatConfig,
 } from "./config";
-import { AbaPaywayProvider } from "./aba-payway";
-import { resolveAbaPaywayConfig } from "./aba-payway-config";
 import {
   CHANNELS_PENDING_CREDENTIALS,
+  isCancelledChannel,
   isManualConfirmationChannel,
 } from "./channel-policy";
 
@@ -47,6 +46,13 @@ export function resolveProvider(
   options: ResolveProviderOptions = {},
 ): ResolvedProvider {
   const ch = channel as PaymentChannel;
+  if (isCancelledChannel(channel)) {
+    return {
+      provider: null,
+      usable: false,
+      missing: ["CHANNEL_CANCELLED"],
+    };
+  }
   if (isManualConfirmationChannel(channel)) {
     return {
       provider: null,
@@ -153,20 +159,8 @@ export function resolveProvider(
     }
   }
 
-  if (channel === "ABA_PAYWAY") {
-    const cfg = resolveAbaPaywayConfig(paymentConfig);
-    if (!cfg.usable) {
-      return { provider: null, usable: false, missing: cfg.missing };
-    }
-    return {
-      provider: new AbaPaywayProvider({ paymentConfig, channel: ch }),
-      usable: true,
-      missing: [],
-    };
-  }
-
-  // Oceanpayment / ANTOM / ChinaUMS / Lakala 等 Adapter 在凭证与官方对接完成后在此插入。
-  // 未接入的渠道保持 fail-closed，禁止伪造支付成功。
+  // Oceanpayment / ANTOM / ChinaUMS / Lakala / 汇付斗拱 / 杉德 等 Adapter
+  // 在进件结果、正式文档和生产凭证确定后在此插入。未接入渠道保持 fail-closed。
   return {
     provider: null,
     usable: false,

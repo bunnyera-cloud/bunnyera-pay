@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  CASHIER_ROUTABLE_CHANNELS,
   canAuthorizeNewPayments,
   canEnableMerchantChannel,
   canStartNewProviderPayment,
   isAuthorizationBadgeReady,
+  isCancelledChannel,
   isKybApproved,
   isManualConfirmationChannel,
   isPendingCredentialsChannel,
@@ -41,7 +43,7 @@ test("unapproved KYB cannot enable real collection channels", () => {
   const blocked = canAuthorizeNewPayments("ALIPAY_BAR", "NOT_SUBMITTED");
   assert.equal(blocked.ok, false);
   if (!blocked.ok) assert.match(blocked.error, /KYB 未批准/);
-  const pending = canStartNewProviderPayment("ABA_PAYWAY", "PENDING");
+  const pending = canStartNewProviderPayment("UNIONPAY_QR", "PENDING");
   assert.equal(pending.ok, false);
 });
 
@@ -67,8 +69,22 @@ test("WeChat Native cannot be authorized without production credentials", () => 
 
 test("approved KYB can authorize a real, credentialed channel", () => {
   assert.deepEqual(canAuthorizeNewPayments("ALIPAY_BAR", "APPROVED"), { ok: true });
-  assert.deepEqual(canAuthorizeNewPayments("ABA_PAYWAY", "APPROVED"), { ok: true });
   assert.deepEqual(canStartNewProviderPayment("UNIONPAY_QR", "APPROVED"), { ok: true });
+});
+
+test("cancelled ABA PayWay is not routable or authorizable", () => {
+  assert.equal(isCancelledChannel("ABA_PAYWAY"), true);
+  assert.equal(
+    (CASHIER_ROUTABLE_CHANNELS as readonly string[]).includes("ABA_PAYWAY"),
+    false,
+  );
+  const blocked = canAuthorizeNewPayments("ABA_PAYWAY", "APPROVED");
+  assert.equal(blocked.ok, false);
+  if (!blocked.ok) assert.match(blocked.error, /CHANNEL_CANCELLED/);
+  assert.equal(canEnableMerchantChannel("ABA_PAYWAY", "APPROVED", "ACTIVE").ok, false);
+  assert.equal(canStartNewProviderPayment("ABA_PAYWAY", "APPROVED").ok, false);
+  assert.equal(providerProductionStatus("ABA_PAYWAY", true), "DISABLED");
+  assert.equal(resolveChannelNotifyPath("ABA_PAYWAY", "https://pay.example"), "");
 });
 
 test("WeChat external QR is manual confirmation and never a WeChat Pay API", () => {
