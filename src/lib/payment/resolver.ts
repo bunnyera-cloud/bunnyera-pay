@@ -12,6 +12,12 @@ import {
   resolveUnionPayConfig,
   resolveWechatConfig,
 } from "./config";
+import { AbaPaywayProvider } from "./aba-payway";
+import { resolveAbaPaywayConfig } from "./aba-payway-config";
+import {
+  CHANNELS_PENDING_CREDENTIALS,
+  isManualConfirmationChannel,
+} from "./channel-policy";
 
 // Provider 解析结果：provider 为空或 usable=false 时，业务层必须 fail-closed 拒绝
 export interface ResolvedProvider {
@@ -41,6 +47,13 @@ export function resolveProvider(
   options: ResolveProviderOptions = {},
 ): ResolvedProvider {
   const ch = channel as PaymentChannel;
+  if (isManualConfirmationChannel(channel)) {
+    return {
+      provider: null,
+      usable: false,
+      missing: ["MANUAL_CONFIRMATION_REQUIRED"],
+    };
+  }
   if (!paymentConfig?.isActive) {
     return {
       provider: null,
@@ -48,14 +61,19 @@ export function resolveProvider(
       missing: ["PAYMENT_CONFIG_INACTIVE"],
     };
   }
-  if (
-    (options.purpose || "NEW_PAYMENT") === "NEW_PAYMENT" &&
-    options.merchantChannel?.isEnabled !== true
-  ) {
+  const purpose = options.purpose || "NEW_PAYMENT";
+  if (purpose === "NEW_PAYMENT" && options.merchantChannel?.isEnabled !== true) {
     return {
       provider: null,
       usable: false,
       missing: ["MERCHANT_CHANNEL_DISABLED"],
+    };
+  }
+  if (purpose === "NEW_PAYMENT" && CHANNELS_PENDING_CREDENTIALS.has(channel)) {
+    return {
+      provider: null,
+      usable: false,
+      missing: ["PENDING_CREDENTIALS"],
     };
   }
 
@@ -135,7 +153,20 @@ export function resolveProvider(
     }
   }
 
-  // 未来 ANTOM_* / CHINAUMS_* / LAKALA_* Adapter 在此统一插入
+  if (channel === "ABA_PAYWAY") {
+    const cfg = resolveAbaPaywayConfig(paymentConfig);
+    if (!cfg.usable) {
+      return { provider: null, usable: false, missing: cfg.missing };
+    }
+    return {
+      provider: new AbaPaywayProvider({ paymentConfig, channel: ch }),
+      usable: true,
+      missing: [],
+    };
+  }
+
+  // Oceanpayment / ANTOM / ChinaUMS / Lakala 等 Adapter 在凭证与官方对接完成后在此插入。
+  // 未接入的渠道保持 fail-closed，禁止伪造支付成功。
   return {
     provider: null,
     usable: false,

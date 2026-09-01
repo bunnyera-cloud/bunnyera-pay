@@ -3,6 +3,11 @@ import prisma from '@/lib/db';
 import { withAuth, successResponse, errorResponse } from '@/lib/api-utils';
 import { resolveProvider } from '@/lib/payment/resolver';
 import { recordAuditLog } from '@/lib/audit';
+import {
+  MANUAL_CONFIRMATION_REQUIRED,
+  isManualConfirmationChannel,
+} from '@/lib/payment/channel-policy';
+import { canAccessStore, resolveStoreAccess } from '@/lib/store-access';
 
 // 关闭订单
 export async function POST(
@@ -15,13 +20,22 @@ export async function POST(
     if (!order || order.merchantId !== ctx.user.merchantId) {
       return errorResponse('订单不存在', 404);
     }
+    const scope = await resolveStoreAccess(ctx.user);
+    if (!canAccessStore(scope, order.storeId)) {
+      return errorResponse('订单不存在', 404);
+    }
     if (order.status === 'PAID') return errorResponse('订单已支付，不能关闭', 409);
     if (order.status === 'CLOSED') return successResponse({ status: 'CLOSED' });
     if (order.status !== 'CREATED' && order.status !== 'PAYING') {
       return errorResponse(`订单状态（${order.status}）不可关闭`, 409);
     }
 
-    if (order.paymentEnv !== 'PREVIEW') {
+    const localCloseOnly =
+      order.paymentEnv === 'PREVIEW' ||
+      isManualConfirmationChannel(order.channel) ||
+      order.confirmationMode === MANUAL_CONFIRMATION_REQUIRED;
+
+    if (!localCloseOnly) {
       const paymentConfig = await prisma.paymentConfig.findFirst({
         where: { merchantId: order.merchantId, channel: order.channel, isActive: true },
       });

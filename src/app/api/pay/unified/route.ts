@@ -12,6 +12,13 @@ import {
 import { z } from 'zod';
 import Decimal from 'decimal.js';
 import { validateOrderContext } from '@/lib/payment/order-context';
+import { canAccessStore, canWriteAtStore, resolveStoreAccess } from '@/lib/store-access';
+import {
+  CHANNELS_PENDING_CREDENTIALS,
+  canStartNewProviderPayment,
+  isKybApproved,
+  resolveChannelNotifyPath,
+} from '@/lib/payment/channel-policy';
 
 // 统一聚合支付请求
 const unifiedPaySchema = z.object({
@@ -25,7 +32,7 @@ const unifiedPaySchema = z.object({
     'ALIPAY_BAR', 'ALIPAY_PC', 'ALIPAY_WAP',
     'WECHAT_NATIVE', 'WECHAT_H5', 'WECHAT_JSAPI', 'WECHAT_MINI',
     'UNIONPAY_GATEWAY', 'UNIONPAY_WAP', 'UNIONPAY_QR',
-    'LAKALA_AGGREGATE',
+    'ABA_PAYWAY',
   ]).optional(),
   scene: z.enum(['QR_CODE', 'CASHIER', 'ONLINE', 'H5', 'MINI_PROGRAM', 'APP']),
   brandId: z.string().optional(),
@@ -62,6 +69,14 @@ export async function POST(request: NextRequest) {
     if (!merchant || merchant.status !== 'ACTIVE') {
       return errorResponse('商户不可用', 403);
     }
+    const scope = await resolveStoreAccess(ctx.user);
+    if (data.channel) {
+      if (!canWriteAtStore(scope, data.storeId)) {
+        return errorResponse('无权在该分店发起支付', 403);
+      }
+    } else if (data.storeId && !canAccessStore(scope, data.storeId)) {
+      return errorResponse('无权在该分店发起支付', 403);
+    }
 
     const contextError = await validateOrderContext(merchantId, data);
     if (contextError) return errorResponse(contextError, 400);
@@ -69,9 +84,12 @@ export async function POST(request: NextRequest) {
 
     // 指定渠道：先确认渠道配置可用（fail-closed），再创建订单，绝不创建 demo 订单
     if (data.channel) {
-      // PREVIEW 只用于静态演示，统一支付接口绝不实例化或调用真实 Provider。
       if (!canCallPaymentProvider(paymentEnv)) {
         return errorResponse("PREVIEW 环境禁止发起真实支付", 409);
+      }
+      const paymentGate = canStartNewProviderPayment(data.channel, merchant.kybStatus);
+      if (!paymentGate.ok) {
+        return errorResponse(paymentGate.error, 400);
       }
       const [paymentConfig, merchantChannel] = await Promise.all([
         prisma.paymentConfig.findFirst({
@@ -127,9 +145,7 @@ export async function POST(request: NextRequest) {
         const baseUrl = resolveBaseUrl(req.headers);
         const notifyUrl = data.channel.startsWith('ALIPAY')
           ? resolveAlipayNotifyUrl(req.headers, paymentConfig.notifyUrl)
-          : data.channel.startsWith('WECHAT')
-            ? `${baseUrl}/api/pay/wechat/notify`
-            : `${baseUrl}/api/pay/unionpay/notify`;
+          : resolveChannelNotifyPath(data.channel, baseUrl);
 
         const result = await resolved.provider.createPayment({
           orderNo,
@@ -187,21 +203,24 @@ export async function POST(request: NextRequest) {
       merchantChannels.map((item) => [item.channel, item]),
     );
 
-    const availableChannels = configs
-      .filter(
-        (c) =>
-          resolveProvider(c.channel, c, {
-            merchantChannel: enabledChannels.get(c.channel),
-          }).usable,
-      )
-      .map(c => ({
-        channel: c.channel,
-        channelName: getChannelName(c.channel),
-        isSandbox: c.isSandbox,
-      }));
+    const availableChannels = isKybApproved(merchant.kybStatus)
+      ? configs
+          .filter(
+            (c) =>
+              !CHANNELS_PENDING_CREDENTIALS.has(c.channel) &&
+              resolveProvider(c.channel, c, {
+                merchantChannel: enabledChannels.get(c.channel),
+              }).usable,
+          )
+          .map(c => ({
+            channel: c.channel,
+            channelName: getChannelName(c.channel),
+            isSandbox: c.isSandbox,
+          }))
+      : [];
 
     if (availableChannels.length === 0) {
-      return errorResponse('该商户尚未配置任何支付渠道', 400);
+      return errorResponse('收款渠道待开通', 400);
     }
 
     return successResponse({
@@ -223,6 +242,7 @@ function getChannelName(channel: string): string {
     UNIONPAY_GATEWAY: '银联网关',
     UNIONPAY_WAP: '银联WAP',
     UNIONPAY_QR: '银联二维码',
+    ABA_PAYWAY: 'ABA PayWay',
     LAKALA_AGGREGATE: '拉卡拉聚合',
   };
   return names[channel] || channel;

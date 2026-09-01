@@ -8,6 +8,11 @@ import {
   settleVerifiedPayment,
   validatePaidQueryTransition,
 } from "@/lib/payment/transitions";
+import {
+  MANUAL_CONFIRMATION_REQUIRED,
+  isManualConfirmationChannel,
+} from "@/lib/payment/channel-policy";
+import { canAccessStore, resolveStoreAccess } from "@/lib/store-access";
 
 // 主动向官方渠道查单补偿（不依赖回调）
 export async function POST(
@@ -22,11 +27,25 @@ export async function POST(
       if (!order || order.merchantId !== ctx.user.merchantId) {
         return errorResponse("订单不存在", 404);
       }
+      const scope = await resolveStoreAccess(ctx.user);
+      if (!canAccessStore(scope, order.storeId)) {
+        return errorResponse("订单不存在", 404);
+      }
 
       const isExpired =
         (order.status === "CREATED" || order.status === "PAYING") &&
         !!order.expiredAt &&
         order.expiredAt.getTime() < Date.now();
+
+      if (
+        isManualConfirmationChannel(order.channel) ||
+        order.confirmationMode === MANUAL_CONFIRMATION_REQUIRED
+      ) {
+        return successResponse({
+          status: order.status,
+          source: "MANUAL_CONFIRMATION_REQUIRED",
+        });
+      }
 
       if (
         order.paymentEnv === "PREVIEW" ||

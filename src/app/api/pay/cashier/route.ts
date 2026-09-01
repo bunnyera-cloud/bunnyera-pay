@@ -8,6 +8,12 @@ import {
   resolvePaymentEnv,
   resolveBaseUrl,
 } from '@/lib/payment/config';
+import {
+  MANUAL_CONFIRMATION_REQUIRED,
+  canStartNewProviderPayment,
+  isManualConfirmationChannel,
+  resolveChannelNotifyPath,
+} from '@/lib/payment/channel-policy';
 import { z } from 'zod';
 import Decimal from 'decimal.js';
 
@@ -15,6 +21,7 @@ import Decimal from 'decimal.js';
  * 聚合收款码收银台 API（顾客扫码访问，无需商户登录态）。
  * 订单归属完全由收款码决定：merchantId / brandId / storeId / qrcodeId / channel。
  * 仅受理真实已配置渠道；未配置一律拒绝，绝不模拟支付成功。
+ * WECHAT_EXTERNAL_QR 只展示/跳转外部静态码，必须人工确认，禁止自动 PAID。
  */
 
 const cashierPaySchema = z.object({
@@ -23,8 +30,12 @@ const cashierPaySchema = z.object({
     value => new Decimal(value).decimalPlaces() <= 2,
     '金额最多保留两位小数'
   ).optional(),
-  channel: z.enum(['ALIPAY_BAR', 'WECHAT_NATIVE', 'UNIONPAY_QR']),
+  channel: z.enum(['ALIPAY_BAR', 'WECHAT_NATIVE', 'UNIONPAY_QR', 'ABA_PAYWAY', 'WECHAT_EXTERNAL_QR']),
 });
+
+function isDirectImageSource(value: string): boolean {
+  return value.startsWith('data:image/') || /^https?:\/\//i.test(value);
+}
 
 // 创建收银订单
 export async function POST(request: NextRequest): Promise<NextResponse> {
@@ -42,12 +53,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     );
   }
   const data = validation.data;
+  const manualChannel = isManualConfirmationChannel(data.channel);
 
   // 查找收款码
   const qrCode = await prisma.qRCode.findUnique({
     where: { code: data.code },
     include: {
-      merchant: { select: { id: true, companyName: true, status: true } },
+      merchant: { select: { id: true, companyName: true, status: true, kybStatus: true } },
     },
   });
 
@@ -84,6 +96,12 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   if (merchant.status !== 'ACTIVE') {
     return errorResponse('商户不可用', 403);
   }
+  if (!manualChannel) {
+    const paymentGate = canStartNewProviderPayment(data.channel, merchant.kybStatus);
+    if (!paymentGate.ok) {
+      return errorResponse(paymentGate.error, 400);
+    }
+  }
 
   // 固定入口码由顾客输入金额；动态订单码金额由服务端收款码记录决定。
   const amount = qrCode.type === 'DYNAMIC' ? Number(qrCode.amount) : data.amount;
@@ -95,6 +113,80 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
   if (qrCode.type === 'DYNAMIC' && qrCode.orderId) {
     return errorResponse('该动态收款码已创建过订单', 409);
+  }
+
+  if (manualChannel) {
+    const target = await prisma.externalPaymentTarget.findFirst({
+      where: {
+        merchantId: merchant.id,
+        storeId: store.id,
+        channel: 'WECHAT_EXTERNAL_QR',
+        isActive: true,
+      },
+      orderBy: { updatedAt: 'desc' },
+    });
+    if (!target || (!target.qrImageUrl && !target.targetUrl)) {
+      return errorResponse('该分店尚未配置微信外部收款码', 400);
+    }
+
+    const orderNo = generateOrderNo();
+    let order;
+    try {
+      order = await prisma.$transaction(async tx => {
+        const created = await tx.order.create({
+          data: {
+            orderNo,
+            merchantId: merchant.id,
+            brandId: store.brandId,
+            storeId: store.id,
+            departmentId: qrCode.departmentId,
+            counterId: qrCode.counterId,
+            qrcodeId: qrCode.id,
+            subject: qrCode.name || `${merchant.companyName}收款`,
+            amount,
+            currency: 'CNY',
+            channel: data.channel,
+            scene: 'QR_CODE',
+            status: 'PAYING',
+            paymentEnv: 'MANUAL',
+            confirmationMode: MANUAL_CONFIRMATION_REQUIRED,
+            payData: target.targetUrl || target.qrImageUrl,
+            expiredAt: new Date(Date.now() + 15 * 60 * 1000),
+            clientIp: getClientIp(request),
+            userAgent: request.headers.get('user-agent'),
+          },
+        });
+        if (qrCode.type === 'DYNAMIC') {
+          const claimed = await tx.qRCode.updateMany({
+            where: { id: qrCode.id, orderId: null },
+            data: { orderId: created.id },
+          });
+          if (claimed.count === 0) throw new Error('DYNAMIC_QR_ALREADY_USED');
+        }
+        return created;
+      });
+    } catch (error) {
+      if ((error as Error).message === 'DYNAMIC_QR_ALREADY_USED') {
+        return errorResponse('该动态收款码已创建过订单', 409);
+      }
+      throw error;
+    }
+
+    const payImageUrl = target.qrImageUrl && isDirectImageSource(target.qrImageUrl)
+      ? target.qrImageUrl
+      : null;
+    return successResponse({
+      orderNo,
+      status: 'PAYING',
+      payData: target.targetUrl || target.qrImageUrl,
+      payImageUrl,
+      targetUrl: target.targetUrl,
+      displayName: target.displayName,
+      paymentEnv: 'MANUAL',
+      confirmationMode: MANUAL_CONFIRMATION_REQUIRED,
+      statusToken: order.id,
+      message: '请使用微信扫码。支付完成后由商户人工确认，系统不会自动标记已支付',
+    });
   }
 
   // 渠道配置校验（fail closed：未配置/不可用一律拒绝）
@@ -189,9 +281,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
     const notifyUrl = data.channel.startsWith('ALIPAY')
       ? resolveAlipayNotifyUrl(request.headers, paymentConfig.notifyUrl)
-      : data.channel.startsWith('WECHAT')
-        ? `${baseUrl}/api/pay/wechat/notify`
-        : `${baseUrl}/api/pay/unionpay/notify`;
+      : resolveChannelNotifyPath(data.channel, baseUrl);
 
     const payResult = await resolved.provider.createPayment({
       orderNo,
@@ -242,7 +332,14 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
   const order = await prisma.order.findUnique({
     where: { orderNo },
-    select: { id: true, orderNo: true, status: true, amount: true, expiredAt: true },
+    select: {
+      id: true,
+      orderNo: true,
+      status: true,
+      amount: true,
+      expiredAt: true,
+      confirmationMode: true,
+    },
   });
   if (!order) {
     return errorResponse('订单不存在', 404);
@@ -256,6 +353,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     status: order.status,
     amount: Number(order.amount),
     expired: order.expiredAt ? order.expiredAt.getTime() < Date.now() : false,
+    confirmationMode: order.confirmationMode,
   });
 }
 

@@ -12,6 +12,8 @@ import {
 import { z } from 'zod';
 import Decimal from 'decimal.js';
 import { validateOrderContext } from '@/lib/payment/order-context';
+import { canAccessStore, canWriteAtStore, applyStoreScopeToOrderWhere, resolveStoreAccess } from '@/lib/store-access';
+import { canStartNewProviderPayment, resolveChannelNotifyPath } from '@/lib/payment/channel-policy';
 
 const createOrderSchema = z.object({
   amount: z.number().positive('金额必须大于 0').max(1000000).refine(
@@ -23,7 +25,7 @@ const createOrderSchema = z.object({
     'ALIPAY_BAR', 'ALIPAY_PC', 'ALIPAY_WAP',
     'WECHAT_NATIVE', 'WECHAT_H5', 'WECHAT_JSAPI', 'WECHAT_MINI',
     'UNIONPAY_GATEWAY', 'UNIONPAY_WAP', 'UNIONPAY_QR',
-    'LAKALA_AGGREGATE',
+    'ABA_PAYWAY',
   ]),
   scene: z.enum(['QR_CODE', 'CASHIER', 'ONLINE', 'H5', 'MINI_PROGRAM', 'APP']),
   brandId: z.string().optional(),
@@ -62,6 +64,15 @@ export async function POST(request: NextRequest) {
       return errorResponse('商户不可用', 403);
     }
 
+    const scope = await resolveStoreAccess(ctx.user);
+    if (!canWriteAtStore(scope, data.storeId)) {
+      return errorResponse('无权在该分店创建订单', 403);
+    }
+    const paymentGate = canStartNewProviderPayment(data.channel, merchant.kybStatus);
+    if (!paymentGate.ok) {
+      return errorResponse(paymentGate.error, 400);
+    }
+
     const contextError = await validateOrderContext(merchantId, data);
     if (contextError) return errorResponse(contextError, 400);
 
@@ -80,7 +91,12 @@ export async function POST(request: NextRequest) {
     if (!paymentConfig) {
       return errorResponse('该支付渠道尚未配置或未启用', 400);
     }
-    if (!data.channel.startsWith('ALIPAY') && !data.channel.startsWith('WECHAT') && !data.channel.startsWith('UNIONPAY')) {
+    if (
+      !data.channel.startsWith('ALIPAY') &&
+      !data.channel.startsWith('WECHAT') &&
+      !data.channel.startsWith('UNIONPAY') &&
+      data.channel !== 'ABA_PAYWAY'
+    ) {
       return errorResponse(`不支持的支付渠道: ${data.channel}`, 400);
     }
     const resolved = resolveProvider(data.channel, paymentConfig, {
@@ -144,9 +160,7 @@ export async function POST(request: NextRequest) {
       // 根据渠道类型调用 Provider（实例化统一通过 resolveProvider 收口）
       const notifyUrl = data.channel.startsWith('ALIPAY')
         ? resolveAlipayNotifyUrl(req.headers, paymentConfig.notifyUrl)
-        : data.channel.startsWith('WECHAT')
-          ? `${baseUrl}/api/pay/wechat/notify`
-          : `${baseUrl}/api/pay/unionpay/notify`;
+        : resolveChannelNotifyPath(data.channel, baseUrl);
 
       const payResult = await resolved.provider.createPayment({
         orderNo,
@@ -206,11 +220,19 @@ export async function GET(request: NextRequest) {
     const startDate = url.searchParams.get('startDate');
     const endDate = url.searchParams.get('endDate');
 
-    const where = { merchantId: ctx.user.merchantId } as Prisma.OrderWhereInput;
+    const scope = await resolveStoreAccess(ctx.user);
+    if (storeId && !canAccessStore(scope, storeId)) {
+      return errorResponse('无权查看该分店订单', 403);
+    }
+
+    const where = applyStoreScopeToOrderWhere(
+      scope,
+      { merchantId: ctx.user.merchantId } as Prisma.OrderWhereInput,
+      storeId,
+    );
     if (status) where.status = status as OrderStatus;
     if (channel) where.channel = channel as PaymentChannel;
     if (orderNo) where.orderNo = { contains: orderNo };
-    if (storeId) where.storeId = storeId;
     if (startDate || endDate) {
       where.createdAt = {};
       if (startDate) where.createdAt.gte = new Date(startDate);
@@ -235,6 +257,8 @@ export async function GET(request: NextRequest) {
           status: true,
           channelTradeNo: true,
           storeId: true,
+          qrcodeId: true,
+          confirmationMode: true,
           paidAt: true,
           expiredAt: true,
           createdAt: true,

@@ -4,6 +4,10 @@ import { withAuth, successResponse, errorResponse } from "@/lib/api-utils";
 import { recordAuditLog } from "@/lib/audit";
 import type { PaymentConfig, Prisma } from "@prisma/client";
 import { encryptPaymentSecret } from "@/lib/payment/secret-storage";
+import {
+  canEnableMerchantChannel,
+  providerProductionStatus,
+} from "@/lib/payment/channel-policy";
 import { z } from "zod";
 
 const manageableChannelSchema = z.enum([
@@ -17,6 +21,7 @@ const manageableChannelSchema = z.enum([
   "UNIONPAY_GATEWAY",
   "UNIONPAY_WAP",
   "UNIONPAY_QR",
+  "ABA_PAYWAY",
 ]);
 
 const channelAuthorizationSchema = z.object({
@@ -234,11 +239,21 @@ export async function PATCH(
       }
       const merchant = await prisma.merchant.findUnique({
         where: { id },
-        select: { id: true },
+        select: { id: true, kybStatus: true, status: true },
       });
       if (!merchant) return errorResponse("商户不存在", 404);
 
       const { channel, isEnabled } = validation.data;
+      if (isEnabled) {
+        const authorizationGate = canEnableMerchantChannel(
+          channel,
+          merchant.kybStatus,
+          merchant.status,
+        );
+        if (!authorizationGate.ok) {
+          return errorResponse(authorizationGate.error, 409);
+        }
+      }
       const existing = await prisma.merchantChannel.findUnique({
         where: { merchantId_channel: { merchantId: id, channel } },
       });
@@ -315,10 +330,14 @@ export async function GET(
     );
 
     return successResponse(
-      configs.map((config) => ({
-        ...config,
-        isEnabled: authorizationByChannel.get(config.channel) === true,
-      })),
+      configs.map((config) => {
+        const isEnabled = authorizationByChannel.get(config.channel) === true;
+        return {
+          ...config,
+          isEnabled,
+          productionStatus: providerProductionStatus(config.channel, isEnabled),
+        };
+      }),
     );
   }, ["PLATFORM_SUPER_ADMIN", "PLATFORM_REVIEWER"]);
 }

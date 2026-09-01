@@ -75,6 +75,30 @@ test("UnionPay adapter remains fail-closed without official credentials", () => 
   assert.ok(result.missing.includes("UNIONPAY_VERIFY_CERTIFICATE_OR_PATH"));
 });
 
+test("ABA PayWay stays fail-closed without official credentials", () => {
+  const result = resolveProvider(
+    "ABA_PAYWAY",
+    { isActive: true, isSandbox: false } as PaymentConfig,
+    { merchantChannel: { isEnabled: true } },
+  );
+  assert.equal(result.usable, false);
+  assert.equal(result.provider, null);
+  assert.ok(result.missing.includes("ABA_PAYWAY_MERCHANT_ID"));
+  assert.ok(result.missing.includes("ABA_PAYWAY_API_KEY"));
+  assert.ok(result.missing.includes("ABA_PAYWAY_RSA_PUBLIC_KEY"));
+});
+
+test("unwired channels such as Oceanpayment stay fail-closed", () => {
+  const result = resolveProvider(
+    "OCEANPAYMENT",
+    { isActive: true, isSandbox: false } as PaymentConfig,
+    { merchantChannel: { isEnabled: true } },
+  );
+  assert.equal(result.usable, false);
+  assert.equal(result.provider, null);
+  assert.match(result.missing.join(" "), /暂无对应 Provider Adapter/);
+});
+
 test("disabled MerchantChannel is rejected before provider creation", () => {
   const result = resolveProvider(
     "WECHAT_NATIVE",
@@ -90,6 +114,40 @@ test("PREVIEW environment never permits provider calls", () => {
   assert.equal(canCallPaymentProvider("PREVIEW"), false);
   assert.equal(canCallPaymentProvider("SANDBOX"), true);
   assert.equal(canCallPaymentProvider("PRODUCTION"), true);
+});
+
+test("WeChat Native new payments stay fail-closed even when enabled", () => {
+  const result = resolveProvider(
+    "WECHAT_NATIVE",
+    { isActive: true, isSandbox: false } as PaymentConfig,
+    { purpose: "NEW_PAYMENT", merchantChannel: { isEnabled: true } },
+  );
+  assert.equal(result.usable, false);
+  assert.equal(result.provider, null);
+  assert.deepEqual(result.missing, ["PENDING_CREDENTIALS"]);
+});
+
+test("existing WeChat orders are not blocked by PENDING_CREDENTIALS at resolve", () => {
+  const result = resolveProvider(
+    "WECHAT_NATIVE",
+    { isActive: true, isSandbox: false } as PaymentConfig,
+    { purpose: "EXISTING_ORDER", merchantChannel: { isEnabled: true } },
+  );
+  assert.equal(result.usable, false);
+  assert.equal(result.provider, null);
+  assert.equal(result.missing.includes("PENDING_CREDENTIALS"), false);
+  assert.ok(result.missing.some((item) => item.startsWith("WECHAT_")));
+});
+
+test("WeChat external QR is never a WeChat API provider", () => {
+  const result = resolveProvider(
+    "WECHAT_EXTERNAL_QR",
+    { isActive: true, isSandbox: false } as PaymentConfig,
+    { merchantChannel: { isEnabled: true } },
+  );
+  assert.equal(result.usable, false);
+  assert.equal(result.provider, null);
+  assert.deepEqual(result.missing, ["MANUAL_CONFIRMATION_REQUIRED"]);
 });
 
 test("production rejects an HTTP APP_BASE_URL", () => {
