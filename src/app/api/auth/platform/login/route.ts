@@ -3,15 +3,29 @@ import bcrypt from 'bcryptjs';
 import prisma from '@/lib/db';
 import { signToken } from '@/lib/auth';
 import { recordAuditLog } from '@/lib/audit';
+import { getClientIp, normalizeIdentity } from '@/lib/security/client-ip';
+import { limitAuthWrite } from '@/lib/security/cashier-guard';
+import { rateLimitResponse } from '@/lib/security/rate-limit';
 
 // 平台管理员登录
 export async function POST(request: NextRequest) {
   try {
+    const ip = getClientIp(request);
+    const ipLimit = await limitAuthWrite({ ip });
+    if (ipLimit) return rateLimitResponse(ipLimit);
+
     const { email, password } = await request.json();
 
     if (!email || !password) {
       return NextResponse.json({ error: '请输入邮箱和密码' }, { status: 400 });
     }
+
+    const identityLimit = await limitAuthWrite({
+      ip,
+      identity: normalizeIdentity(String(email)),
+      includeIp: false,
+    });
+    if (identityLimit) return rateLimitResponse(identityLimit);
 
     const user = await prisma.platformUser.findUnique({ where: { email } });
     if (!user) {
@@ -28,6 +42,10 @@ export async function POST(request: NextRequest) {
     // 检查是否被锁定
     if (user.lockedUntil && user.lockedUntil > new Date()) {
       return NextResponse.json({ error: '账户已锁定，请稍后再试' }, { status: 423 });
+    }
+
+    if (!user.isActive) {
+      return NextResponse.json({ error: '账户已被禁用' }, { status: 403 });
     }
 
     const valid = await bcrypt.compare(password, user.passwordHash);

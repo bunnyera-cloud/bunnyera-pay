@@ -4,6 +4,9 @@ import prisma from '@/lib/db';
 import { generateMerchantNo, signToken } from '@/lib/auth';
 import { recordAuditLog } from '@/lib/audit';
 import { z } from 'zod';
+import { getClientIp, normalizeIdentity } from '@/lib/security/client-ip';
+import { limitAuthWrite } from '@/lib/security/cashier-guard';
+import { rateLimitResponse } from '@/lib/security/rate-limit';
 
 const registerSchema = z.object({
   country: z.string().min(2),
@@ -26,6 +29,10 @@ const registerSchema = z.object({
 // 商户注册
 export async function POST(request: NextRequest) {
   try {
+    const ip = getClientIp(request);
+    const ipLimit = await limitAuthWrite({ ip });
+    if (ipLimit) return rateLimitResponse(ipLimit);
+
     const body = await request.json();
     const validation = registerSchema.safeParse(body);
 
@@ -37,11 +44,24 @@ export async function POST(request: NextRequest) {
     }
 
     const data = validation.data;
+    const identityLimit = await limitAuthWrite({
+      ip,
+      identity: normalizeIdentity(data.email),
+      includeIp: false,
+    });
+    if (identityLimit) return rateLimitResponse(identityLimit);
 
     // 检查邮箱是否已注册
     const existing = await prisma.merchant.findUnique({ where: { email: data.email } });
     if (existing) {
       return NextResponse.json({ error: '该邮箱已注册商户' }, { status: 409 });
+    }
+    const existingMember = await prisma.merchantMember.findUnique({
+      where: { email: data.email },
+      select: { id: true },
+    });
+    if (existingMember) {
+      return NextResponse.json({ error: '该邮箱已被成员账号使用' }, { status: 409 });
     }
 
     // 检查统一社会信用代码是否已注册
@@ -72,7 +92,8 @@ export async function POST(request: NextRequest) {
           businessAddress: data.businessAddress,
           businessCategory: data.businessCategory,
           website: data.website || null,
-          status: 'SUBMITTED',
+          status: 'ACTIVE',
+          kybStatus: 'NOT_SUBMITTED',
           agreementAccepted: true,
           agreementVersion: '1.0',
         },
@@ -122,7 +143,7 @@ export async function POST(request: NextRequest) {
         merchantNo: merchant.merchantNo,
         token,
       },
-      message: '商户注册成功，已提交审核，请等待平台管理员审核',
+      message: '商户注册成功。可先创建门店和收款码；真实收款需完成 KYB 并由平台开通渠道',
     });
   } catch (error) {
     console.error('Merchant register error:', error);

@@ -1,9 +1,16 @@
 import { NextRequest } from "next/server";
 import prisma from "@/lib/db";
 import { withAuth, successResponse, errorResponse } from "@/lib/api-utils";
+import { withRateLimitedAuth } from "@/lib/security/api-guard";
 import { recordAuditLog } from "@/lib/audit";
-import type { PaymentConfig, Prisma } from "@prisma/client";
+import type { PaymentConfig } from "@prisma/client";
 import { encryptPaymentSecret } from "@/lib/payment/secret-storage";
+import { mergePaymentExtraConfig } from "@/lib/payment/extra-config";
+import {
+  isDocumentedPaymentFmPayType,
+  paymentFmWalletPatchExtra,
+  readStoredPaymentFmWalletFields,
+} from "@/lib/payment/paymentfm-config";
 import {
   canEnableMerchantChannel,
   providerProductionStatus,
@@ -21,12 +28,21 @@ const manageableChannelSchema = z.enum([
   "UNIONPAY_GATEWAY",
   "UNIONPAY_WAP",
   "UNIONPAY_QR",
+  "PAYMENTFM_AGGREGATE",
 ]);
 
 const channelAuthorizationSchema = z.object({
   channel: manageableChannelSchema,
-  isEnabled: z.boolean(),
-});
+  isEnabled: z.boolean().optional(),
+  enabledWallets: z.array(z.enum(["WECHAT", "ALIPAY", "UNIONPAY"])).optional(),
+  payTypes: z.array(z.string()).optional(),
+}).refine(
+  (data) =>
+    data.isEnabled !== undefined ||
+    data.enabledWallets !== undefined ||
+    data.payTypes !== undefined,
+  { message: "没有可更新的字段" },
+);
 
 // 为商户创建/更新渠道配置
 export async function POST(
@@ -34,7 +50,7 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  return withAuth(
+  return withRateLimitedAuth(
     request,
     async (req) => {
       const body = await req.json();
@@ -65,6 +81,8 @@ export async function POST(
         sellerId,
         appCertSn,
         alipayRootCertSn,
+        payTypes,
+        enabledWallets,
       } = body;
 
       if (!channel) {
@@ -103,7 +121,7 @@ export async function POST(
             unionpayMchId: unionpayMchId || existing.unionpayMchId,
             unionpayCert: unionpayCert || existing.unionpayCert,
             keyPath: keyPath || existing.keyPath,
-            extraConfig: mergeExtraConfig(existing.extraConfig, {
+            extraConfig: mergePaymentExtraConfig(existing.extraConfig, {
               platformSerialNo,
               platformCertPath,
               sellerId,
@@ -114,6 +132,7 @@ export async function POST(
               frontTransUrl: unionpayFrontTransUrl,
               backTransUrl: unionpayBackTransUrl,
               queryTransUrl: unionpayQueryTransUrl,
+              ...paymentFmWalletExtra(channel, { payTypes, enabledWallets }),
             }),
             isSandbox: isSandbox ?? existing.isSandbox,
             isActive: true,
@@ -149,7 +168,7 @@ export async function POST(
           notifyUrl: notifyUrl || "",
           unionpayMchId: unionpayMchId || "",
           unionpayCert: unionpayCert || "",
-          extraConfig: mergeExtraConfig(null, {
+          extraConfig: mergePaymentExtraConfig(null, {
             platformSerialNo,
             platformCertPath,
             sellerId,
@@ -160,6 +179,7 @@ export async function POST(
             frontTransUrl: unionpayFrontTransUrl,
             backTransUrl: unionpayBackTransUrl,
             queryTransUrl: unionpayQueryTransUrl,
+            ...paymentFmWalletExtra(channel, { payTypes, enabledWallets }),
           }),
           isSandbox: isSandbox || false,
           isActive: true,
@@ -178,26 +198,28 @@ export async function POST(
       return successResponse(toSafePaymentConfig(created), "渠道配置已创建");
     },
     ["PLATFORM_SUPER_ADMIN"],
+    "channel-write",
+    id,
   );
 }
 
-function mergeExtraConfig(
-  current: Prisma.JsonValue | null,
-  next: Record<string, unknown>,
-): Prisma.InputJsonObject {
-  const base =
-    current && typeof current === "object" && !Array.isArray(current)
-      ? (current as Prisma.JsonObject)
-      : {};
-  return Object.fromEntries([
-    ...Object.entries(base),
-    ...Object.entries(next).filter(
-      ([, value]) => typeof value === "string" && value.trim(),
-    ),
-  ]) as Prisma.InputJsonObject;
+function paymentFmWalletExtra(
+  channel: unknown,
+  input: { payTypes?: unknown; enabledWallets?: unknown },
+): Record<string, unknown> {
+  if (channel !== "PAYMENTFM_AGGREGATE") return {};
+  if (input.payTypes === undefined && input.enabledWallets === undefined) return {};
+  const payTypes = Array.isArray(input.payTypes)
+    ? input.payTypes.filter((item) => isDocumentedPaymentFmPayType(String(item)))
+    : undefined;
+  return paymentFmWalletPatchExtra({
+    enabledWallets: input.enabledWallets,
+    payTypes,
+  });
 }
 
 function toSafePaymentConfig(config: PaymentConfig) {
+  const wallets = readStoredPaymentFmWalletFields(config.extraConfig);
   return {
     id: config.id,
     merchantId: config.merchantId,
@@ -213,6 +235,8 @@ function toSafePaymentConfig(config: PaymentConfig) {
     hasPublicKey: !!config.publicKey,
     hasApiV3Key: !!config.apiKey,
     hasUnionpayCertificate: !!config.unionpayCert,
+    enabledWallets: wallets.enabledWallets,
+    payTypes: wallets.payTypes,
     createdAt: config.createdAt,
     updatedAt: config.updatedAt,
   };
@@ -229,7 +253,7 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  return withAuth(
+  return withRateLimitedAuth(
     request,
     async (req, ctx) => {
       const validation = channelAuthorizationSchema.safeParse(await req.json());
@@ -242,8 +266,8 @@ export async function PATCH(
       });
       if (!merchant) return errorResponse("商户不存在", 404);
 
-      const { channel, isEnabled } = validation.data;
-      if (isEnabled) {
+      const { channel, isEnabled, enabledWallets, payTypes } = validation.data;
+      if (isEnabled === true) {
         const authorizationGate = canEnableMerchantChannel(
           channel,
           merchant.kybStatus,
@@ -253,46 +277,94 @@ export async function PATCH(
           return errorResponse(authorizationGate.error, 409);
         }
       }
-      const existing = await prisma.merchantChannel.findUnique({
-        where: { merchantId_channel: { merchantId: id, channel } },
-      });
-      const authorization = await prisma.merchantChannel.upsert({
-        where: { merchantId_channel: { merchantId: id, channel } },
-        create: { merchantId: id, channel, isEnabled },
-        update: { isEnabled },
-        select: {
-          id: true,
-          merchantId: true,
-          channel: true,
-          isEnabled: true,
-          updatedAt: true,
-        },
-      });
 
-      await recordAuditLog({
-        platformUserId: ctx.user.sub,
-        action: isEnabled ? "MERCHANT_CHANNEL_ENABLE" : "MERCHANT_CHANNEL_DISABLE",
-        resource: "merchant_channel",
-        resourceId: authorization.id,
-        request,
-        beforeData: existing
-          ? {
-              merchantId: existing.merchantId,
-              channel: existing.channel,
-              isEnabled: existing.isEnabled,
-            }
-          : undefined,
-        afterData: {
-          merchantId: authorization.merchantId,
-          channel: authorization.channel,
-          isEnabled: authorization.isEnabled,
-        },
-        result: "SUCCESS",
-      });
+      let authorization = null;
+      if (isEnabled !== undefined) {
+        const existing = await prisma.merchantChannel.findUnique({
+          where: { merchantId_channel: { merchantId: id, channel } },
+        });
+        authorization = await prisma.merchantChannel.upsert({
+          where: { merchantId_channel: { merchantId: id, channel } },
+          create: { merchantId: id, channel, isEnabled },
+          update: { isEnabled },
+          select: {
+            id: true,
+            merchantId: true,
+            channel: true,
+            isEnabled: true,
+            updatedAt: true,
+          },
+        });
+        await recordAuditLog({
+          platformUserId: ctx.user.sub,
+          action: isEnabled ? "MERCHANT_CHANNEL_ENABLE" : "MERCHANT_CHANNEL_DISABLE",
+          resource: "merchant_channel",
+          resourceId: authorization.id,
+          request,
+          beforeData: existing
+            ? {
+                merchantId: existing.merchantId,
+                channel: existing.channel,
+                isEnabled: existing.isEnabled,
+              }
+            : undefined,
+          afterData: {
+            merchantId: authorization.merchantId,
+            channel: authorization.channel,
+            isEnabled: authorization.isEnabled,
+          },
+          result: "SUCCESS",
+        });
+      }
 
-      return successResponse(authorization, isEnabled ? "渠道已启用" : "渠道已停用");
+      let walletConfig: { enabledWallets: string[]; payTypes: string[] } | null = null;
+      if (channel === "PAYMENTFM_AGGREGATE" && (enabledWallets !== undefined || payTypes !== undefined)) {
+        const wallets = paymentFmWalletPatchExtra({ enabledWallets, payTypes });
+        const existingConfig = await prisma.paymentConfig.findFirst({
+          where: { merchantId: id, channel: "PAYMENTFM_AGGREGATE" },
+        });
+        const extraConfig = mergePaymentExtraConfig(existingConfig?.extraConfig, wallets);
+        if (existingConfig) {
+          await prisma.paymentConfig.update({
+            where: { id: existingConfig.id },
+            data: { extraConfig },
+          });
+        } else {
+          await prisma.paymentConfig.create({
+            data: {
+              merchantId: id,
+              channel: "PAYMENTFM_AGGREGATE",
+              extraConfig,
+              isActive: false,
+              isSandbox: true,
+            },
+          });
+        }
+        walletConfig = {
+          enabledWallets: Array.isArray(extraConfig.enabledWallets)
+            ? extraConfig.enabledWallets as string[]
+            : [],
+          payTypes: Array.isArray(extraConfig.payTypes)
+            ? extraConfig.payTypes as string[]
+            : [],
+        };
+      }
+
+      return successResponse(
+        {
+          ...(authorization || { merchantId: id, channel }),
+          ...(walletConfig || {}),
+        },
+        isEnabled === undefined
+          ? "钱包配置已更新"
+          : isEnabled
+            ? "渠道已启用"
+            : "渠道已停用",
+      );
     },
     ["PLATFORM_SUPER_ADMIN"],
+    "channel-write",
+    id,
   );
 }
 
@@ -315,6 +387,7 @@ export async function GET(
           isSandbox: true,
           gateway: true,
           notifyUrl: true,
+          extraConfig: true,
           createdAt: true,
           updatedAt: true,
         },
@@ -331,10 +404,22 @@ export async function GET(
     return successResponse(
       configs.map((config) => {
         const isEnabled = authorizationByChannel.get(config.channel) === true;
+        const wallets = readStoredPaymentFmWalletFields(config.extraConfig);
         return {
-          ...config,
+          id: config.id,
+          channel: config.channel,
+          appId: config.appId,
+          mchId: config.mchId,
+          isActive: config.isActive,
+          isSandbox: config.isSandbox,
+          gateway: config.gateway,
+          notifyUrl: config.notifyUrl,
+          createdAt: config.createdAt,
+          updatedAt: config.updatedAt,
           isEnabled,
           productionStatus: providerProductionStatus(config.channel, isEnabled),
+          enabledWallets: wallets.enabledWallets,
+          payTypes: wallets.payTypes,
         };
       }),
     );

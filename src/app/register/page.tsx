@@ -81,6 +81,7 @@ export default function RegisterPage() {
         localStorage.setItem('bep_merchant_user', JSON.stringify({
           merchantId: data.data.merchantId,
           merchantNo: data.data.merchantNo,
+          role: 'MERCHANT_OWNER',
         }));
         router.push('/dashboard');
       }

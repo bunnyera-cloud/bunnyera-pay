@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/db';
 import { withAuth, successResponse, errorResponse } from '@/lib/api-utils';
+import { resolveStoreAccess } from '@/lib/store-access';
 import { z } from 'zod';
 
 // 业务规则：每个商户主体最多 10 个分店（跨品牌合计）
@@ -74,6 +75,19 @@ export async function POST(request: NextRequest) {
             code: d.code,
           })),
         });
+        const departments = await tx.department.findMany({
+          where: { storeId: store.id },
+          select: { id: true, name: true },
+        });
+        if (departments.length > 0) {
+          await tx.counter.createMany({
+            data: departments.map((department) => ({
+              departmentId: department.id,
+              name: `${department.name}收银台`,
+              code: 'CTR01',
+            })),
+          });
+        }
       }
 
       return store;
@@ -94,11 +108,13 @@ export async function POST(request: NextRequest) {
 export async function GET(request: NextRequest) {
   return withAuth(request, async (req, ctx) => {
     const merchantId = ctx.user.merchantId!;
+    const scope = await resolveStoreAccess(ctx.user);
 
     const brands = await prisma.brand.findMany({
       where: { merchantId },
       include: {
         stores: {
+          where: scope.unrestricted ? undefined : { id: { in: scope.storeIds } },
           include: {
             departments: { include: { counters: true } },
           },
@@ -107,5 +123,5 @@ export async function GET(request: NextRequest) {
     });
 
     return successResponse(brands);
-  }, ['MERCHANT_OWNER', 'MERCHANT_ADMIN', 'FINANCE', 'STORE_MANAGER']);
+  }, ['MERCHANT_OWNER', 'MERCHANT_ADMIN', 'FINANCE', 'STORE_MANAGER', 'CASHIER']);
 }

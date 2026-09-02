@@ -7,11 +7,13 @@ import type { PaymentProvider } from "./provider";
 import { AlipayProvider } from "./alipay";
 import { WechatPayProvider } from "./wechat";
 import { UnionPayProvider } from "./unionpay";
+import { PaymentFmProvider } from "./paymentfm";
 import {
   resolveAlipayConfig,
   resolveUnionPayConfig,
   resolveWechatConfig,
 } from "./config";
+import { resolvePaymentFmConfig } from "./paymentfm-config";
 import {
   CHANNELS_PENDING_CREDENTIALS,
   isCancelledChannel,
@@ -159,7 +161,19 @@ export function resolveProvider(
     }
   }
 
-  // Oceanpayment / ANTOM / ChinaUMS / Lakala / 汇付斗拱 / 杉德 等 Adapter
+  if (channel === "PAYMENTFM_AGGREGATE") {
+    const cfg = resolvePaymentFmConfig(paymentConfig);
+    if (!cfg.usable) {
+      return { provider: null, usable: false, missing: cfg.missing };
+    }
+    return {
+      provider: new PaymentFmProvider(cfg),
+      usable: true,
+      missing: [],
+    };
+  }
+
+  // Oceanpayment / ANTOM / ChinaUMS / Lakala / 杉德 等 Adapter
   // 在进件结果、正式文档和生产凭证确定后在此插入。未接入渠道保持 fail-closed。
   return {
     provider: null,

@@ -3,6 +3,7 @@ import { resolveProvider } from "./resolver";
 import { recordAuditLog } from "@/lib/audit";
 import { amountToFen, resolveBaseUrl } from "./config";
 import { validateRefundSuccessAmount } from "./transitions";
+import { isManualConfirmationChannel } from "./channel-policy";
 
 // 退款执行结果：ok=false 时订单绝不被标记为退款成功（fail-closed）
 export interface RefundExecution {
@@ -79,6 +80,19 @@ export async function executeChannelRefund(
 
   const amount = Number(refund.amount);
   const totalAmount = Number(order.amount);
+
+  if (isManualConfirmationChannel(order.channel)) {
+    await prisma.refund.updateMany({
+      where: { id: refund.id, status: { in: ["APPROVED", "PROCESSING"] } },
+      data: { status: "FAILED", processedAt: new Date() },
+    });
+    return {
+      ok: false,
+      refundStatus: "FAILED",
+      error: "外部静态收款码订单不支持原渠道退款",
+      orderUpdated: false,
+    };
+  }
 
   // 解析订单对应渠道的 Provider（未配置/不可用直接 fail-closed）
   const paymentConfig = await prisma.paymentConfig.findFirst({

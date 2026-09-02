@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/db';
 import { withAuth, successResponse, errorResponse } from '@/lib/api-utils';
+import { canAccessStore, resolveStoreAccess } from '@/lib/store-access';
 
 const ROLES = ['MERCHANT_OWNER', 'MERCHANT_ADMIN', 'FINANCE', 'STORE_MANAGER', 'CASHIER', 'CUSTOMER_SERVICE'];
 
@@ -23,6 +24,10 @@ export async function GET(
     });
 
     if (!order || order.merchantId !== ctx.user.merchantId) {
+      return errorResponse('订单不存在', 404);
+    }
+    const scope = await resolveStoreAccess(ctx.user);
+    if (!canAccessStore(scope, order.storeId)) {
       return errorResponse('订单不存在', 404);
     }
 

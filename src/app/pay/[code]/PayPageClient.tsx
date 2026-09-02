@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Image from 'next/image';
 import QRCode from 'qrcode';
 
@@ -18,12 +18,20 @@ interface QRCodeInfo {
 interface ChannelInfo {
   channel: string;
   name: string;
+  availability: 'READY' | 'PENDING' | 'MANUAL';
+  confirmationMode?: string;
   isSandbox: boolean;
+  walletType?: 'WECHAT' | 'ALIPAY' | 'UNIONPAY';
 }
 
 const CHANNEL_STYLE: Record<string, { color: string; icon: string; scanTip: string }> = {
   ALIPAY_BAR: { color: 'from-blue-400 to-blue-600', icon: '支', scanTip: '请使用支付宝扫码支付' },
   WECHAT_NATIVE: { color: 'from-green-400 to-green-600', icon: '微', scanTip: '请使用微信扫码支付' },
+  WECHAT_EXTERNAL_QR: {
+    color: 'from-green-400 to-green-600',
+    icon: '微',
+    scanTip: '请使用微信扫码。支付完成后由商户人工确认',
+  },
   UNIONPAY_QR: { color: 'from-red-400 to-red-600', icon: '云', scanTip: '请使用云闪付/银行 App 扫码支付' },
 };
 
@@ -34,8 +42,13 @@ interface PayPageClientProps {
   paymentEnvLabel: string;
 }
 
+function isDirectImageSource(value: string): boolean {
+  return value.startsWith('data:image/') || /^https?:\/\//i.test(value);
+}
+
 export default function PayPageClient({ qrCode, channels, paymentEnv, paymentEnvLabel }: PayPageClientProps) {
-  const [amount, setAmount] = useState(qrCode.amount || '');
+  const isFixed = qrCode.type === 'FIXED';
+  const [amount, setAmount] = useState(isFixed ? (qrCode.amount || '') : '');
   const [selectedChannel, setSelectedChannel] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [qrImage, setQrImage] = useState('');
@@ -43,11 +56,12 @@ export default function PayPageClient({ qrCode, channels, paymentEnv, paymentEnv
   const [orderNo, setOrderNo] = useState('');
   const [statusToken, setStatusToken] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
+  const [manualConfirm, setManualConfirm] = useState(false);
+  const [targetUrl, setTargetUrl] = useState('');
 
-  const hasFixedAmount = !!qrCode.amount;
-  const canPay = hasFixedAmount ? true : !!amount && Number(amount) > 0;
+  const canPay = isFixed ? !!qrCode.amount : !!amount && Number(amount) > 0;
+  const submittingRef = useRef(false);
 
-  // 轮询真实订单状态（以渠道回调落库为准，绝不本地模拟成功）
   useEffect(() => {
     if (payResult !== 'paying' || !orderNo || !statusToken) return;
     const timer = setInterval(async () => {
@@ -74,11 +88,21 @@ export default function PayPageClient({ qrCode, channels, paymentEnv, paymentEnv
     return () => clearInterval(timer);
   }, [payResult, orderNo, statusToken]);
 
-  const handlePay = async (channel: string) => {
-    if (!canPay || loading) return;
+  const handlePay = async (channel: ChannelInfo) => {
+    if (!canPay || loading || submittingRef.current || channel.availability === 'PENDING') return;
+    submittingRef.current = true;
     setLoading(true);
     setErrorMsg('');
-    setSelectedChannel(channel);
+    setSelectedChannel(
+      channel.walletType === 'ALIPAY'
+        ? 'ALIPAY_BAR'
+        : channel.walletType === 'WECHAT'
+          ? 'WECHAT_NATIVE'
+          : channel.walletType === 'UNIONPAY'
+            ? 'UNIONPAY_QR'
+            : channel.channel,
+    );
+    setManualConfirm(channel.availability === 'MANUAL');
 
     try {
       const res = await fetch('/api/pay/cashier', {
@@ -86,8 +110,9 @@ export default function PayPageClient({ qrCode, channels, paymentEnv, paymentEnv
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           code: qrCode.code,
-          amount: hasFixedAmount ? undefined : Number(amount),
-          channel,
+          amount: isFixed ? undefined : Number(amount),
+          channel: channel.channel,
+          walletType: channel.walletType,
         }),
       });
       const json = await res.json();
@@ -95,13 +120,21 @@ export default function PayPageClient({ qrCode, channels, paymentEnv, paymentEnv
         setPayResult('failed');
         setErrorMsg(json.error || '支付创建失败，请重试');
         setLoading(false);
+        submittingRef.current = false;
         return;
       }
 
       setOrderNo(json.data.orderNo);
       setStatusToken(json.data.statusToken);
-      const payData = json.data.payData as string;
-      if (payData) {
+      setManualConfirm(json.data.confirmationMode === 'MANUAL_CONFIRMATION_REQUIRED' || channel.availability === 'MANUAL');
+      setTargetUrl(typeof json.data.targetUrl === 'string' ? json.data.targetUrl : '');
+      const payImageUrl = typeof json.data.payImageUrl === 'string' ? json.data.payImageUrl : '';
+      const payData = typeof json.data.payData === 'string' ? json.data.payData : '';
+      if (payImageUrl && isDirectImageSource(payImageUrl)) {
+        setQrImage(payImageUrl);
+      } else if (payData && isDirectImageSource(payData) && !payData.startsWith('http://localhost') && /\.(png|jpe?g|gif|webp|svg)(\?|$)/i.test(payData)) {
+        setQrImage(payData);
+      } else if (payData) {
         const qr = await QRCode.toDataURL(payData, {
           width: 280,
           margin: 2,
@@ -114,6 +147,7 @@ export default function PayPageClient({ qrCode, channels, paymentEnv, paymentEnv
       setPayResult('failed');
       setErrorMsg('网络异常，请重试');
       setLoading(false);
+      submittingRef.current = false;
     }
   };
 
@@ -124,6 +158,9 @@ export default function PayPageClient({ qrCode, channels, paymentEnv, paymentEnv
     setStatusToken('');
     setErrorMsg('');
     setSelectedChannel(null);
+    setManualConfirm(false);
+    setTargetUrl('');
+    submittingRef.current = false;
   };
 
   const isPreview = paymentEnv === 'PREVIEW';
@@ -131,9 +168,7 @@ export default function PayPageClient({ qrCode, channels, paymentEnv, paymentEnv
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-900 via-blue-950 to-slate-900 flex items-center justify-center p-4">
       <div className="w-full max-w-md">
-        {/* 商户信息 */}
         <div className="text-center mb-6">
-          {/* 深色背景使用白色版品牌 mark，保持等比 */}
           <Image
             src="/brand/bunnyera-pay/mark/mark-white.png"
             alt="BunnyEra Pay"
@@ -153,12 +188,10 @@ export default function PayPageClient({ qrCode, channels, paymentEnv, paymentEnv
           )}
         </div>
 
-        {/* 支付卡片 */}
         <div className="bg-white/5 backdrop-blur-sm border border-white/10 rounded-2xl p-6">
           {payResult === 'idle' && (
             <>
-              {/* 金额输入 */}
-              {!hasFixedAmount && (
+              {!isFixed && (
                 <div className="mb-6">
                   <label className="block text-sm text-gray-400 mb-2">支付金额</label>
                   <div className="relative">
@@ -176,45 +209,55 @@ export default function PayPageClient({ qrCode, channels, paymentEnv, paymentEnv
                 </div>
               )}
 
-              {hasFixedAmount && amount && (
+              {isFixed && amount && (
                 <div className="text-center mb-6">
                   <p className="text-gray-400 text-sm mb-1">应付金额</p>
                   <p className="text-white text-4xl font-bold">¥{parseFloat(amount).toFixed(2)}</p>
                 </div>
               )}
 
-              {/* 支付方式（仅显示商户真实已开通且配置完整的渠道） */}
-              {channels.length > 0 ? (
-                <>
-                  <p className="text-gray-400 text-sm mb-3">选择支付方式</p>
-                  <div className="space-y-2">
-                    {channels.map(ch => {
-                      const style = CHANNEL_STYLE[ch.channel] || CHANNEL_STYLE.ALIPAY_BAR;
-                      return (
-                        <button
-                          key={ch.channel}
-                          onClick={() => handlePay(ch.channel)}
-                          disabled={loading || !canPay}
-                          className="w-full flex items-center gap-4 px-4 py-3.5 bg-white/5 border border-white/10 rounded-xl hover:bg-white/10 disabled:opacity-50 transition group"
-                        >
-                          <div className={`w-10 h-10 rounded-lg bg-gradient-to-br ${style.color} flex items-center justify-center flex-shrink-0`}>
-                            <span className="text-white font-bold text-sm">{style.icon}</span>
-                          </div>
-                          <span className="text-white font-medium flex-1 text-left">
-                            {ch.name}
-                            {ch.isSandbox && <span className="ml-2 text-xs text-amber-400">沙箱</span>}
-                          </span>
-                          <span className="text-gray-500 group-hover:text-white transition">→</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </>
-              ) : (
-                <div className="text-center py-8">
-                  <p className="text-gray-300 font-medium mb-1">该商户暂未开通任何支付方式</p>
-                  <p className="text-gray-500 text-xs">请联系商户开通支付宝 / 微信支付后再试</p>
-                </div>
+              <p className="text-gray-400 text-sm mb-3">选择支付方式</p>
+              <div className="space-y-2">
+                {channels.map(ch => {
+                  const styleKey =
+                    ch.walletType === 'ALIPAY'
+                      ? 'ALIPAY_BAR'
+                      : ch.walletType === 'WECHAT'
+                        ? 'WECHAT_NATIVE'
+                        : ch.walletType === 'UNIONPAY'
+                          ? 'UNIONPAY_QR'
+                          : ch.channel;
+                  const style = CHANNEL_STYLE[styleKey] || CHANNEL_STYLE.ALIPAY_BAR;
+                  const pending = ch.availability === 'PENDING';
+                  return (
+                    <button
+                      key={`${ch.channel}:${ch.walletType || ch.name}`}
+                      onClick={() => handlePay(ch)}
+                      disabled={loading || !canPay || pending}
+                      className="w-full flex items-center gap-4 px-4 py-3.5 bg-white/5 border border-white/10 rounded-xl hover:bg-white/10 disabled:opacity-50 transition group"
+                    >
+                      <div className={`w-10 h-10 rounded-lg bg-gradient-to-br ${style.color} flex items-center justify-center flex-shrink-0`}>
+                        <span className="text-white font-bold text-sm">{style.icon}</span>
+                      </div>
+                      <span className="text-white font-medium flex-1 text-left">
+                        {ch.name}
+                        {pending && <span className="ml-2 text-xs text-amber-400">待开通</span>}
+                        {ch.availability === 'MANUAL' && (
+                          <span className="ml-2 text-xs text-amber-400">人工确认</span>
+                        )}
+                        {ch.isSandbox && <span className="ml-2 text-xs text-amber-400">沙箱</span>}
+                      </span>
+                      <span className="text-gray-500 group-hover:text-white transition">
+                        {pending ? '' : '→'}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              {!channels.some(ch => ch.availability === 'READY' || ch.availability === 'MANUAL') && (
+                <p className="text-amber-300 text-sm mt-3 text-center">
+                  支付渠道尚未配置
+                </p>
               )}
             </>
           )}
@@ -222,19 +265,36 @@ export default function PayPageClient({ qrCode, channels, paymentEnv, paymentEnv
           {payResult === 'paying' && (
             <div className="text-center py-4">
               <div className="bg-white rounded-xl p-4 inline-block mb-4">
-                {qrImage && <img src={qrImage} alt="支付二维码" className="w-56 h-56" />}
+                {qrImage && <img src={qrImage} alt="支付二维码" className="w-56 h-56 object-contain" />}
               </div>
               <p className="text-white font-medium mb-1">
                 {selectedChannel && CHANNEL_STYLE[selectedChannel]?.scanTip}
               </p>
+              {manualConfirm && (
+                <p className="text-amber-300 text-xs mb-2">
+                  MANUAL_CONFIRMATION_REQUIRED · 系统不会自动标记已支付
+                </p>
+              )}
               <p className="text-gray-400 text-sm">订单号：{orderNo}</p>
               {amount && <p className="text-white text-xl font-bold mt-2">¥{parseFloat(amount).toFixed(2)}</p>}
+              {targetUrl && (
+                <a
+                  href={targetUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-block mt-3 text-blue-300 text-xs underline"
+                >
+                  打开微信支付链接
+                </a>
+              )}
               <div className="mt-4 flex items-center justify-center gap-2">
                 <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
                 <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
                 <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
               </div>
-              <p className="text-gray-500 text-xs mt-2">等待支付中，支付结果以渠道通知为准...</p>
+              <p className="text-gray-500 text-xs mt-2">
+                {manualConfirm ? '等待商户人工确认收款...' : '等待支付中，支付结果以渠道通知为准...'}
+              </p>
               <button
                 onClick={reset}
                 className="mt-4 px-4 py-1.5 text-gray-400 text-xs border border-white/10 rounded-lg hover:bg-white/5 transition"
@@ -253,7 +313,9 @@ export default function PayPageClient({ qrCode, channels, paymentEnv, paymentEnv
               <p className="text-gray-400 text-sm">订单号：{orderNo}</p>
               {amount && <p className="text-white text-2xl font-bold mt-2">¥{parseFloat(amount).toFixed(2)}</p>}
               <p className="text-gray-500 text-xs mt-4">
-                资金由持牌支付机构直接结算到商户企业账户
+                {manualConfirm
+                  ? '商户已人工确认收到该笔款项'
+                  : '资金由持牌支付机构直接结算到商户企业账户'}
               </p>
             </div>
           )}
@@ -275,7 +337,6 @@ export default function PayPageClient({ qrCode, channels, paymentEnv, paymentEnv
           )}
         </div>
 
-        {/* 底部 */}
         <div className="text-center mt-6">
           <p className="text-gray-600 text-xs">
             Powered by BunnyEra Pay · 多商户支付管理平台

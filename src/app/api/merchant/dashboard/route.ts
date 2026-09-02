@@ -1,20 +1,26 @@
 import { NextRequest } from 'next/server';
 import prisma from '@/lib/db';
 import { withAuth, successResponse } from '@/lib/api-utils';
+import { resolveStoreAccess, storeIdWhere } from '@/lib/store-access';
+import { isCancelledChannel, providerProductionStatus } from '@/lib/payment/channel-policy';
 
-// 与门店 API 保持一致的分店上限
 const MAX_STORES_PER_MERCHANT = 10;
 
-// 商户工作台仪表盘（含分店统计与总店汇总）
 export async function GET(request: NextRequest) {
-  return withAuth(request, async (req, ctx) => {
+  return withAuth(request, async (_req, ctx) => {
     const merchantId = ctx.user.merchantId!;
+    const scope = await resolveStoreAccess(ctx.user);
+    const storeFilter = storeIdWhere(scope);
+    const orderScope = storeFilter ? { storeId: storeFilter } : {};
+    const merchant = await prisma.merchant.findUnique({
+      where: { id: merchantId },
+      select: { kybStatus: true, kybRejectReason: true },
+    });
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
 
-    // 并行查询今日数据
     const [
       totalOrders,
       todayStats,
@@ -23,36 +29,35 @@ export async function GET(request: NextRequest) {
       channelStatus,
       recentOrders,
     ] = await Promise.all([
-      // 累计订单数
       prisma.order.count({
-        where: { merchantId },
+        where: { merchantId, ...orderScope },
       }),
-      // 今日交易统计
       prisma.order.aggregate({
         where: {
           merchantId,
           status: 'PAID',
           paidAt: { gte: today, lt: tomorrow },
+          ...orderScope,
         },
         _sum: { amount: true, refundAmount: true },
         _count: true,
       }),
-      // 待处理退款
       prisma.refund.count({
-        where: { merchantId, status: 'PENDING' },
+        where: {
+          merchantId,
+          status: 'PENDING',
+          ...(storeFilter ? { order: { storeId: storeFilter } } : {}),
+        },
       }),
-      // 待对账订单
       prisma.order.count({
-        where: { merchantId, reconciliationStatus: 'PENDING' },
+        where: { merchantId, reconciliationStatus: 'PENDING', ...orderScope },
       }),
-      // 渠道状态
       prisma.merchantChannel.findMany({
         where: { merchantId },
         select: { channel: true, isEnabled: true },
       }),
-      // 最近订单
       prisma.order.findMany({
-        where: { merchantId },
+        where: { merchantId, ...orderScope },
         take: 10,
         orderBy: { createdAt: 'desc' },
         select: {
@@ -67,33 +72,33 @@ export async function GET(request: NextRequest) {
       }),
     ]);
 
-    // 渠道占比统计
     const channelStats = await prisma.order.groupBy({
       by: ['channel'],
       where: {
         merchantId,
         status: 'PAID',
         paidAt: { gte: today, lt: tomorrow },
+        ...orderScope,
       },
       _sum: { amount: true },
       _count: true,
     });
 
-    // 结算中金额
     const settlingAmount = await prisma.settlement.aggregate({
       where: { merchantId, status: 'SETTLING' },
       _sum: { netAmount: true },
     });
 
-    // 累计交易金额（已支付）
     const totalPaid = await prisma.order.aggregate({
-      where: { merchantId, status: 'PAID' },
+      where: { merchantId, status: 'PAID', ...orderScope },
       _sum: { amount: true },
     });
 
-    // ===== 分店统计（基于 Order.storeId，无数据也返回 0）=====
     const stores = await prisma.store.findMany({
-      where: { brand: { merchantId } },
+      where: {
+        brand: { merchantId },
+        ...(storeFilter ? { id: storeFilter } : {}),
+      },
       include: { brand: { select: { name: true } } },
       orderBy: { createdAt: 'asc' },
     });
@@ -101,7 +106,7 @@ export async function GET(request: NextRequest) {
     const [totalByStore, todayByStore] = await Promise.all([
       prisma.order.groupBy({
         by: ['storeId'],
-        where: { merchantId, status: 'PAID', storeId: { not: null } },
+        where: { merchantId, status: 'PAID', storeId: { not: null }, ...orderScope },
         _sum: { amount: true },
         _count: true,
       }),
@@ -112,6 +117,7 @@ export async function GET(request: NextRequest) {
           status: 'PAID',
           storeId: { not: null },
           paidAt: { gte: today, lt: tomorrow },
+          ...orderScope,
         },
         _sum: { amount: true },
         _count: true,
@@ -139,6 +145,12 @@ export async function GET(request: NextRequest) {
     return successResponse({
       storeCount: stores.length,
       maxStores: MAX_STORES_PER_MERCHANT,
+      kybStatus: merchant?.kybStatus ?? 'NOT_SUBMITTED',
+      kybRejectReason: merchant?.kybRejectReason ?? null,
+      storeAccess: {
+        unrestricted: scope.unrestricted,
+        storeIds: scope.storeIds,
+      },
       totalOrders,
       totalPaidAmount: Number(totalPaid._sum.amount || 0),
       today: {
@@ -154,7 +166,12 @@ export async function GET(request: NextRequest) {
         amount: c._sum.amount || 0,
         count: c._count,
       })),
-      channelStatus,
+      channelStatus: channelStatus
+        .filter((c) => !isCancelledChannel(c.channel))
+        .map((c) => ({
+          ...c,
+          productionStatus: providerProductionStatus(c.channel, c.isEnabled),
+        })),
       recentOrders,
       storeStats,
     });

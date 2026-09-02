@@ -3,18 +3,32 @@ import bcrypt from 'bcryptjs';
 import prisma from '@/lib/db';
 import { signToken } from '@/lib/auth';
 import { recordAuditLog } from '@/lib/audit';
+import { getClientIp, normalizeIdentity } from '@/lib/security/client-ip';
+import { limitAuthWrite } from '@/lib/security/cashier-guard';
+import { rateLimitResponse } from '@/lib/security/rate-limit';
 
 // 商户成员登录
 export async function POST(request: NextRequest) {
   try {
+    const ip = getClientIp(request);
+    const ipLimit = await limitAuthWrite({ ip });
+    if (ipLimit) return rateLimitResponse(ipLimit);
+
     const { email, password } = await request.json();
 
     if (!email || !password) {
       return NextResponse.json({ error: '请输入邮箱和密码' }, { status: 400 });
     }
 
+    const identityLimit = await limitAuthWrite({
+      ip,
+      identity: normalizeIdentity(String(email)),
+      includeIp: false,
+    });
+    if (identityLimit) return rateLimitResponse(identityLimit);
+
     // 查找商户成员
-    const member = await prisma.merchantMember.findFirst({
+    const member = await prisma.merchantMember.findUnique({
       where: { email },
       include: { merchant: true }
     });
@@ -113,7 +127,14 @@ export async function POST(request: NextRequest) {
           role: member.role,
           merchantId: member.merchantId,
           merchantName: member.merchant.companyName,
-          merchantNo: member.merchant.merchantNo
+          merchantNo: member.merchant.merchantNo,
+          kybStatus: member.merchant.kybStatus,
+          merchant: {
+            id: member.merchant.id,
+            merchantNo: member.merchant.merchantNo,
+            companyName: member.merchant.companyName,
+            kybStatus: member.merchant.kybStatus,
+          },
         }
       }
     });

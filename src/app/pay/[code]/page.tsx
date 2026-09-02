@@ -3,6 +3,16 @@ import prisma from "@/lib/db";
 import { resolvePaymentEnv, PAYMENT_ENV_LABEL } from "@/lib/payment/config";
 import { resolveProvider } from "@/lib/payment/resolver";
 import PayPageClient from "./PayPageClient";
+import {
+  CASHIER_ROUTABLE_CHANNELS,
+  CHANNELS_PENDING_CREDENTIALS,
+  MANUAL_CONFIRMATION_REQUIRED,
+  canStartNewProviderPayment,
+  isKybApproved,
+} from "@/lib/payment/channel-policy";
+import { evaluateAggregateQrScan } from "@/lib/qrcode/scan";
+import { listAvailablePaymentFmWallets } from "@/lib/qrcode/wallets";
+import { isMissingPaymentChannelEnum } from "@/lib/payment/schema-compat";
 
 interface PayPageProps {
   params: Promise<{ code: string }>;
@@ -10,17 +20,17 @@ interface PayPageProps {
 
 export const dynamic = "force-dynamic";
 
-// 收银台渠道定义（聚合码扫码场景）
 const CHANNEL_META: Record<string, { name: string }> = {
   ALIPAY_BAR: { name: "支付宝" },
   WECHAT_NATIVE: { name: "微信支付" },
+  WECHAT_EXTERNAL_QR: { name: "微信支付（人工确认）" },
   UNIONPAY_QR: { name: "云闪付" },
+  PAYMENTFM_AGGREGATE: { name: "聚合支付" },
 };
 
 export default async function PayPage({ params }: PayPageProps) {
   const { code } = await params;
 
-  // 查找收款码
   const qrCode = await prisma.qRCode.findUnique({
     where: { code },
     include: {
@@ -30,83 +40,176 @@ export default async function PayPage({ params }: PayPageProps) {
           companyName: true,
           merchantNo: true,
           status: true,
+          kybStatus: true,
         },
       },
     },
   });
 
-  if (!qrCode || !qrCode.isActive) {
-    notFound();
-  }
-  if (qrCode.type === "DYNAMIC" && (!qrCode.amount || qrCode.orderId)) {
-    notFound();
-  }
-  // 服务端组件 force-dynamic，每次请求重新计算过期状态
-  // eslint-disable-next-line react-hooks/purity
-  if (qrCode.expiredAt && qrCode.expiredAt.getTime() < Date.now()) {
-    notFound();
-  }
-  // 商户被拒绝/终止/暂停时不允许收款
-  const merchantStatus = qrCode.merchant.status;
-  if (merchantStatus !== "ACTIVE") {
+  if (!qrCode) {
     notFound();
   }
 
-  // 获取门店信息（聚合码必须绑定分店）
-  let storeInfo: { name: string; brandName: string } | null = null;
+  let storeInfo: { name: string; brandName: string; merchantId: string; isActive: boolean } | null = null;
   if (qrCode.storeId) {
     const store = await prisma.store.findUnique({
       where: { id: qrCode.storeId },
       include: { brand: { select: { name: true, merchantId: true } } },
     });
-    if (
-      store &&
-      store.isActive &&
-      store.brand.merchantId === qrCode.merchantId
-    ) {
-      storeInfo = { name: store.name, brandName: store.brand.name };
+    if (store) {
+      storeInfo = {
+        name: store.name,
+        brandName: store.brand.name,
+        merchantId: store.brand.merchantId,
+        isActive: store.isActive,
+      };
     }
   }
+
+  const scan = evaluateAggregateQrScan({
+    qr: qrCode,
+    merchant: qrCode.merchant,
+    store: storeInfo
+      ? { isActive: storeInfo.isActive, merchantId: storeInfo.merchantId }
+      : null,
+  });
+  if (!scan.ok) {
+    if (scan.status === 404) notFound();
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-6">
+        <div className="max-w-sm w-full rounded-2xl border border-white/10 bg-white/5 p-6 text-center">
+          <p className="text-white text-lg font-medium">{scan.error}</p>
+          <p className="text-slate-400 text-sm mt-2">请联系商户确认收款码状态</p>
+        </div>
+      </div>
+    );
+  }
   if (!storeInfo) {
-    // 未绑定分店或分店已停用的收款码不允许收款
     notFound();
   }
 
-  // 计算该商户真实可用的收银渠道（已启用 + 配置完整）
   const paymentEnv = resolvePaymentEnv();
-  const [configs, merchantChannels] = await Promise.all([
-    prisma.paymentConfig.findMany({
-      where: {
-        merchantId: qrCode.merchantId,
-        isActive: true,
-        channel: { in: ["ALIPAY_BAR", "WECHAT_NATIVE", "UNIONPAY_QR"] },
-      },
-    }),
-    prisma.merchantChannel.findMany({
-      where: {
-        merchantId: qrCode.merchantId,
-        isEnabled: true,
-        channel: { in: ["ALIPAY_BAR", "WECHAT_NATIVE", "UNIONPAY_QR"] },
-      },
-      select: { channel: true, isEnabled: true },
-    }),
-  ]);
+  const cashierChannels = [...CASHIER_ROUTABLE_CHANNELS];
+  const cashierChannelsWithoutFm = cashierChannels.filter(
+    (channel) => channel !== "PAYMENTFM_AGGREGATE",
+  );
+  const kybReady = isKybApproved(qrCode.merchant.kybStatus);
+  const loadCashierRows = (channels: Array<(typeof CASHIER_ROUTABLE_CHANNELS)[number]>) =>
+    Promise.all([
+      prisma.paymentConfig.findMany({
+        where: {
+          merchantId: qrCode.merchantId,
+          isActive: true,
+          channel: { in: channels },
+        },
+      }),
+      prisma.merchantChannel.findMany({
+        where: {
+          merchantId: qrCode.merchantId,
+          isEnabled: true,
+          channel: { in: channels },
+        },
+        select: { channel: true, isEnabled: true },
+      }),
+      prisma.externalPaymentTarget.findMany({
+        where: {
+          merchantId: qrCode.merchantId,
+          storeId: qrCode.storeId,
+          channel: "WECHAT_EXTERNAL_QR",
+          isActive: true,
+        },
+        select: { id: true },
+      }),
+    ]);
+  let configs;
+  let merchantChannels;
+  let externalTargets;
+  try {
+    [configs, merchantChannels, externalTargets] = await loadCashierRows(cashierChannels);
+  } catch (error) {
+    if (!isMissingPaymentChannelEnum(error)) throw error;
+    [configs, merchantChannels, externalTargets] = await loadCashierRows(cashierChannelsWithoutFm);
+  }
   const enabledChannels = new Map(
     merchantChannels.map((item) => [item.channel, item]),
   );
 
-  const channels = configs
-    .filter(
-      (c) =>
-        resolveProvider(c.channel, c, {
-          merchantChannel: enabledChannels.get(c.channel),
-        }).usable,
-    )
-    .map((c) => ({
-      channel: c.channel,
-      name: CHANNEL_META[c.channel]?.name || c.channel,
-      isSandbox: c.isSandbox,
-    }));
+  const isUsable = (channel: (typeof cashierChannels)[number]) => {
+    if (!kybReady || CHANNELS_PENDING_CREDENTIALS.has(channel)) return false;
+    const config = configs.find((item) => item.channel === channel);
+    if (!config) return false;
+    return resolveProvider(channel, config, {
+      merchantChannel: enabledChannels.get(channel),
+    }).usable;
+  };
+
+  const channels: Array<{
+    channel: string;
+    name: string;
+    availability: "READY" | "PENDING" | "MANUAL";
+    confirmationMode?: string;
+    isSandbox: boolean;
+    walletType?: "WECHAT" | "ALIPAY" | "UNIONPAY";
+  }> = [
+    ...(isUsable("ALIPAY_BAR")
+      ? [
+          {
+            channel: "ALIPAY_BAR",
+            name: CHANNEL_META.ALIPAY_BAR.name,
+            availability: "READY" as const,
+            isSandbox: configs.find((item) => item.channel === "ALIPAY_BAR")?.isSandbox ?? false,
+          },
+        ]
+      : []),
+    ...(externalTargets.length > 0
+      ? [
+          {
+            channel: "WECHAT_EXTERNAL_QR",
+            name: CHANNEL_META.WECHAT_EXTERNAL_QR.name,
+            availability: "MANUAL" as const,
+            confirmationMode: MANUAL_CONFIRMATION_REQUIRED,
+            isSandbox: false,
+          },
+        ]
+      : []),
+    ...cashierChannels
+      .filter((channel) =>
+        channel !== "ALIPAY_BAR" &&
+        channel !== "WECHAT_NATIVE" &&
+        channel !== "PAYMENTFM_AGGREGATE"
+      )
+      .filter((channel) => isUsable(channel))
+      .map((channel) => ({
+        channel,
+        name: CHANNEL_META[channel]?.name || channel,
+        availability: "READY" as const,
+        isSandbox: configs.find((item) => item.channel === channel)?.isSandbox ?? false,
+      })),
+    ...(isUsable("PAYMENTFM_AGGREGATE")
+      ? listAvailablePaymentFmWallets({
+          paymentFmUsable: true,
+          merchantChannelEnabled: enabledChannels.get("PAYMENTFM_AGGREGATE")?.isEnabled === true,
+          policyAllows: canStartNewProviderPayment(
+            "PAYMENTFM_AGGREGATE",
+            qrCode.merchant.kybStatus,
+          ).ok,
+          extraConfig: configs.find((item) => item.channel === "PAYMENTFM_AGGREGATE")
+            ?.extraConfig,
+        }).map((walletType) => ({
+          channel: "PAYMENTFM_AGGREGATE" as const,
+          name:
+            walletType === "ALIPAY"
+              ? "支付宝"
+              : walletType === "UNIONPAY"
+                ? "云闪付"
+                : "微信支付",
+          walletType,
+          availability: "READY" as const,
+          isSandbox:
+            configs.find((item) => item.channel === "PAYMENTFM_AGGREGATE")?.isSandbox ?? false,
+        }))
+      : []),
+  ];
 
   return (
     <PayPageClient

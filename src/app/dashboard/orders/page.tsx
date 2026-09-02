@@ -31,6 +31,7 @@ interface OrderRow {
   brandName: string | null;
   paidAt: string | null;
   createdAt: string;
+  confirmationMode?: string | null;
 }
 
 const CHANNEL_NAMES: Record<string, string> = {
@@ -38,6 +39,8 @@ const CHANNEL_NAMES: Record<string, string> = {
   WECHAT_NATIVE: '微信扫码', WECHAT_H5: '微信H5', WECHAT_JSAPI: '微信JSAPI', WECHAT_MINI: '微信小程序',
   UNIONPAY_GATEWAY: '银联网关', UNIONPAY_WAP: '银联WAP', UNIONPAY_QR: '云闪付',
   LAKALA_AGGREGATE: '拉卡拉聚合',
+  WECHAT_EXTERNAL_QR: '微信支付（人工确认）',
+  PAYMENTFM_AGGREGATE: '支付FM聚合',
 };
 
 const STATUS_NAMES: Record<string, string> = {
@@ -62,6 +65,7 @@ export default function MerchantOrdersPage() {
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(0);
+  const [canManualConfirm, setCanManualConfirm] = useState(false);
 
   // 加载分店列表（用于筛选）
   const fetchStores = useCallback(async (t: string) => {
@@ -103,6 +107,13 @@ export default function MerchantOrdersPage() {
     if (!t) { router.push('/login'); return; }
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setToken(t);
+    try {
+      const raw = localStorage.getItem('bep_merchant_user');
+      const user = raw ? JSON.parse(raw) as { role?: string } : null;
+      setCanManualConfirm(['MERCHANT_OWNER', 'MERCHANT_ADMIN', 'FINANCE', 'STORE_MANAGER'].includes(user?.role || ''));
+    } catch {
+      setCanManualConfirm(false);
+    }
     fetchStores(t);
   }, [router, fetchStores]);
 
@@ -110,6 +121,26 @@ export default function MerchantOrdersPage() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (token) fetchOrders(token);
   }, [token, fetchOrders]);
+
+  const confirmManualPayment = async (orderNo: string) => {
+    if (!token) return;
+    const note = window.prompt('请填写人工确认备注（将写入审计日志）');
+    if (!note?.trim()) return;
+    const res = await fetch(`/api/orders/${encodeURIComponent(orderNo)}/manual-confirm`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ note: note.trim() }),
+    });
+    const json = await res.json();
+    if (!res.ok) {
+      alert(json.error || '确认失败');
+      return;
+    }
+    fetchOrders(token);
+  };
 
   return (
     <MerchantShell title="订单管理" description="按分店、状态查看与筛选全部收款订单">
@@ -173,6 +204,7 @@ export default function MerchantOrdersPage() {
               <Th align="right">金额</Th>
               <Th>状态</Th>
               <Th>创建时间</Th>
+              {canManualConfirm ? <Th>操作</Th> : null}
             </TableHeadRow>
             <TableBody>
               {orders.map(o => (
@@ -191,8 +223,22 @@ export default function MerchantOrdersPage() {
                   </Td>
                   <Td>{CHANNEL_NAMES[o.channel] || o.channel}</Td>
                   <Td align="right" className="text-slate-900 font-semibold">¥{Number(o.amount).toFixed(2)}</Td>
-                  <Td><Badge tone={STATUS_TONE[o.status] || 'muted'}>{STATUS_NAMES[o.status] || o.status}</Badge></Td>
+                  <Td>
+                    <Badge tone={STATUS_TONE[o.status] || 'muted'}>{STATUS_NAMES[o.status] || o.status}</Badge>
+                    {o.confirmationMode === 'MANUAL_CONFIRMATION_REQUIRED' && o.status !== 'PAID' ? (
+                      <div className="text-xs text-amber-600 mt-1">待人工确认</div>
+                    ) : null}
+                  </Td>
                   <Td className="text-slate-400 text-xs">{new Date(o.createdAt).toLocaleString('zh-CN')}</Td>
+                  {canManualConfirm ? (
+                    <Td>
+                      {o.confirmationMode === 'MANUAL_CONFIRMATION_REQUIRED' && (o.status === 'PAYING' || o.status === 'CREATED') ? (
+                        <Button size="sm" onClick={() => confirmManualPayment(o.orderNo)}>人工确认收款</Button>
+                      ) : (
+                        <span className="text-slate-300">—</span>
+                      )}
+                    </Td>
+                  ) : null}
                 </tr>
               ))}
             </TableBody>

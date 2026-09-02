@@ -72,6 +72,7 @@ enum PaymentChannel {
   PAYPAL            // PayPal
   ABA_PAYWAY        // ABA PayWay（柬埔寨，凭证待开通时保持 fail-closed）
   WECHAT_EXTERNAL_QR // 微信外部静态收款码（展示/跳转，人工确认，不走微信支付 API）
+  PAYMENTFM_AGGREGATE // 支付FM聚合（BunnyEra 自有码入口，通道侧下单/查单/通知）
 }
 
 enum PaymentScene {
@@ -410,6 +411,13 @@ model Order {
   channel           PaymentChannel
   scene             PaymentScene
   channelTradeNo    String?       // 支付机构交易号
+  // 聚合通道实际钱包：WECHAT / ALIPAY / UNIONPAY 等。直连订单可空。
+  walletType        String?
+  source            String?
+  externalOrderNo   String?
+  shopNotifyUrl     String?
+  shopNotifyStatus  String?
+  apiAppId          String?
 
   // 支付渠道返回的动态支付内容（当面付二维码内容 / 网页支付跳转 URL）
   payData           String?       @db.Text
@@ -456,11 +464,14 @@ model Order {
   refunds           Refund[]
   callbackLogs      CallbackLog[]
   payments          PaymentRecord[]
+  apiApp            ApiApp?       @relation(fields: [apiAppId], references: [id])
 
   @@index([merchantId, createdAt])
   @@index([merchantId, status])
   @@index([channelTradeNo])
   @@index([qrcodeId, status])
+  @@index([merchantId, externalOrderNo])
+  @@unique([merchantId, externalOrderNo])
   @@map("orders")
 }
 
@@ -659,6 +670,7 @@ model ApiApp {
   updatedAt  DateTime @updatedAt
 
   merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  orders   Order[]
 
   @@map("api_apps")
 }

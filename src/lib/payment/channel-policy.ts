@@ -21,6 +21,7 @@ export const CASHIER_ROUTABLE_CHANNELS = [
   "ALIPAY_BAR",
   "WECHAT_NATIVE",
   "UNIONPAY_QR",
+  "PAYMENTFM_AGGREGATE",
 ] as const satisfies readonly PaymentChannel[];
 
 /** Cancelled products stay in the Prisma enum but must not be offered or loaded. */
@@ -131,6 +132,7 @@ export function canStartNewProviderPayment(
 
 export function resolveChannelNotifyPath(channel: string, baseUrl: string): string {
   if (isManualConfirmationChannel(channel) || isCancelledChannel(channel)) return "";
+  if (channel === "PAYMENTFM_AGGREGATE") return `${baseUrl}/api/pay/paymentfm/notify`;
   if (channel.startsWith("WECHAT")) return `${baseUrl}/api/pay/wechat/notify`;
   if (channel.startsWith("UNIONPAY")) return `${baseUrl}/api/pay/unionpay/notify`;
   return `${baseUrl}/api/pay/alipay/notify`;

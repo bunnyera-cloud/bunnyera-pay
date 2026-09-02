@@ -37,7 +37,14 @@ export default function StoresPage() {
   const [brands, setBrands] = useState<Brand[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
+  const [externalStore, setExternalStore] = useState<Store | null>(null);
+  const [externalForm, setExternalForm] = useState({
+    displayName: '微信支付（人工确认）',
+    qrImageUrl: '',
+    targetUrl: '',
+  });
   const [submitting, setSubmitting] = useState(false);
+  const [canManage, setCanManage] = useState(false);
   const [form, setForm] = useState({
     brandName: '',
     brandCode: '',
@@ -65,9 +72,16 @@ export default function StoresPage() {
   };
 
   useEffect(() => {
+    try {
+      const raw = localStorage.getItem('bep_merchant_user');
+      const user = raw ? JSON.parse(raw) as { role?: string } : null;
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setCanManage(user?.role === 'MERCHANT_OWNER' || user?.role === 'MERCHANT_ADMIN');
+    } catch {
+      setCanManage(false);
+    }
     const token = localStorage.getItem('bep_merchant_token');
     if (!token) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchStores();
   }, []);
 
@@ -102,15 +116,55 @@ export default function StoresPage() {
     }
   };
 
+  const handleExternalSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!externalStore) return;
+    if (!externalForm.qrImageUrl && !externalForm.targetUrl) {
+      alert('请提供微信收款码图片或跳转链接');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const token = localStorage.getItem('bep_merchant_token');
+      const res = await fetch(`/api/stores/${externalStore.id}/external-targets`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          channel: 'WECHAT_EXTERNAL_QR',
+          displayName: externalForm.displayName,
+          qrImageUrl: externalForm.qrImageUrl || undefined,
+          targetUrl: externalForm.targetUrl || undefined,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.error || '保存失败');
+        return;
+      }
+      setExternalStore(null);
+      setExternalForm({ displayName: '微信支付（人工确认）', qrImageUrl: '', targetUrl: '' });
+      alert('已保存微信外部收款码。BunnyEra 永久码不会被替换，顾客扫码后展示该码并需人工确认。');
+    } catch {
+      alert('网络错误');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   return (
     <MerchantShell
       title="门店管理"
-      description="管理品牌与分店，每个商户主体最多 10 个分店"
+      description="总部可管理全部分店；分店账号仅能查看已授权门店"
       actions={
-        <Button onClick={() => setShowForm(true)}>
-          <PlusIcon className="w-4 h-4" />
-          新建门店
-        </Button>
+        canManage ? (
+          <Button onClick={() => setShowForm(true)}>
+            <PlusIcon className="w-4 h-4" />
+            新建门店
+          </Button>
+        ) : undefined
       }
     >
       {loading ? (
@@ -121,7 +175,7 @@ export default function StoresPage() {
             icon={<StoreIcon className="w-6 h-6" />}
             title="暂无门店"
             description="创建您的第一个品牌和分店，再为分店生成收款码"
-            action={<Button onClick={() => setShowForm(true)}>创建门店</Button>}
+            action={canManage ? <Button onClick={() => setShowForm(true)}>创建门店</Button> : undefined}
           />
         </Card>
       ) : (
@@ -145,6 +199,44 @@ export default function StoresPage() {
                     <p className="text-slate-400 text-xs mb-1">编号：{store.code}</p>
                     {store.address ? <p className="text-slate-500 text-xs mb-1">{store.address}</p> : null}
                     {store.phone ? <p className="text-slate-500 text-xs">电话：{store.phone}</p> : null}
+                    {canManage ? (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setExternalStore(store);
+                          setExternalForm({
+                            displayName: '微信支付（人工确认）',
+                            qrImageUrl: '',
+                            targetUrl: '',
+                          });
+                        }}
+                        className="text-xs text-blue-600 hover:text-blue-700"
+                      >
+                        配置微信外部收款码
+                      </button>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const token = localStorage.getItem('bep_merchant_token');
+                          const res = await fetch(`/api/stores/${store.id}`, {
+                            method: 'PATCH',
+                            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                            body: JSON.stringify({ isActive: !store.isActive }),
+                          });
+                          if (!res.ok) {
+                            const data = await res.json();
+                            alert(data.error || '更新失败');
+                            return;
+                          }
+                          fetchStores();
+                        }}
+                        className="text-xs text-slate-600 hover:text-slate-900"
+                      >
+                        {store.isActive ? '停用门店' : '启用门店'}
+                      </button>
+                      </div>
+                    ) : null}
                     <div className="mt-3 pt-3 border-t border-slate-100">
                       <p className="text-slate-400 text-xs mb-1.5">{store.departments.length} 个部门</p>
                       <div className="flex flex-wrap gap-1">
@@ -217,6 +309,45 @@ export default function StoresPage() {
             </Button>
             <Button type="submit" disabled={submitting} className="flex-1">
               {submitting ? '创建中...' : '创建门店'}
+            </Button>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal
+        open={!!externalStore}
+        onClose={() => setExternalStore(null)}
+        title="微信外部收款码"
+        maxWidth="max-w-lg"
+      >
+        <form onSubmit={handleExternalSubmit} className="space-y-4">
+          <p className="text-slate-500 text-xs">
+            仅展示或跳转现有可收款微信码，不调用微信支付 API，不自动标记已支付。BunnyEra 永久码保持不变。
+          </p>
+          <Input
+            label="显示名称"
+            required
+            value={externalForm.displayName}
+            onChange={e => setExternalForm(p => ({ ...p, displayName: e.target.value }))}
+          />
+          <Input
+            label="收款码图片 URL"
+            value={externalForm.qrImageUrl}
+            onChange={e => setExternalForm(p => ({ ...p, qrImageUrl: e.target.value }))}
+            placeholder="https://.../wechat-qr.png"
+          />
+          <Input
+            label="跳转链接"
+            value={externalForm.targetUrl}
+            onChange={e => setExternalForm(p => ({ ...p, targetUrl: e.target.value }))}
+            placeholder="weixin:// 或 https://..."
+          />
+          <div className="flex gap-3 pt-2">
+            <Button variant="secondary" className="flex-1" onClick={() => setExternalStore(null)}>
+              取消
+            </Button>
+            <Button type="submit" disabled={submitting} className="flex-1">
+              {submitting ? '保存中...' : '保存'}
             </Button>
           </div>
         </form>

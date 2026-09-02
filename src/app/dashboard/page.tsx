@@ -24,6 +24,9 @@ interface StoreStat {
 interface DashboardData {
   storeCount: number;
   maxStores: number;
+  kybStatus?: string;
+  kybRejectReason?: string | null;
+  storeAccess?: { unrestricted: boolean; storeIds: string[] };
   totalOrders: number;
   totalPaidAmount: number;
   today: {
@@ -78,13 +81,24 @@ export default function DashboardPage() {
   const activeChannels = data ? data.channelStatus.filter(c => c.isEnabled).length : 0;
 
   return (
-    <MerchantShell title="工作台" description="商户经营总览：全分店订单与交易汇总">
+    <MerchantShell title="工作台" description="商户经营总览：总部可看全部分店，分店账号仅看授权门店">
       {!data ? (
         <div className="flex items-center justify-center h-64">
           <p className="text-slate-400 text-sm">加载中...</p>
         </div>
       ) : (
         <div className="space-y-6">
+          {data.kybStatus && data.kybStatus !== 'APPROVED' && (
+            <Card className="p-4 border-amber-200 bg-amber-50">
+              <p className="text-amber-900 text-sm font-medium">
+                {data.kybStatus === 'PENDING' ? 'KYB 审核中' : data.kybStatus === 'REJECTED' ? 'KYB 已拒绝' : 'KYB 尚未提交'}
+              </p>
+              <p className="text-amber-800 text-xs mt-1">
+                门店、收款码和后台可以继续使用。真实收款渠道需 KYB 通过并由平台开通。
+                {data.kybRejectReason ? ` 原因：${data.kybRejectReason}` : ''}
+              </p>
+            </Card>
+          )}
           {/* 核心指标 */}
           <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
             <StatCard label="总订单数" value={data.totalOrders} icon={<OrdersIcon className="w-5 h-5" />} />
@@ -100,7 +114,7 @@ export default function DashboardPage() {
             <StatCard
               label="活跃支付渠道"
               value={activeChannels}
-              hint={activeChannels > 0 ? '渠道已开通并可用' : '尚未开通渠道'}
+              hint={activeChannels > 0 ? '已批准且已开通的渠道' : '收款渠道待开通'}
               icon={<ChannelIcon className="w-5 h-5" />}
             />
           </div>

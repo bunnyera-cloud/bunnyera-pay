@@ -22,6 +22,7 @@ export const PAYMENT_CHANNEL_NAMES: Record<PaymentChannel, string> = {
   PAYPAL: 'PayPal',
   ABA_PAYWAY: 'ABA PayWay',
   WECHAT_EXTERNAL_QR: '微信支付（人工确认）',
+  PAYMENTFM_AGGREGATE: '支付FM聚合',
 };
 
 // 商户状态中文映射

@@ -23,7 +23,7 @@ export default function MerchantShell({
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [user, setUser] = useState<MerchantUserInfo | null>(null);
-  const [ready, setReady] = useState(false);
+  const [hasToken, setHasToken] = useState(false);
 
   useEffect(() => {
     const token = localStorage.getItem('bep_merchant_token');
@@ -31,6 +31,7 @@ export default function MerchantShell({
       router.push('/login');
       return;
     }
+    setHasToken(true);
     try {
       const raw = localStorage.getItem('bep_merchant_user');
       // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -38,7 +39,6 @@ export default function MerchantShell({
     } catch {
       setUser(null);
     }
-    setReady(true);
   }, [router]);
 
   const handleLogout = () => {
@@ -47,10 +47,13 @@ export default function MerchantShell({
     router.push('/login');
   };
 
-  if (!ready) {
+  // SSR and the first client paint both render this gate (hasToken starts false).
+  // Cursor's browser injects data-cursor-ref onto the <p> before hydrate; that is
+  // the mismatch React reported, not a server/client branch in this component.
+  if (!hasToken) {
     return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
-        <p className="text-slate-400 text-sm">加载中...</p>
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center" suppressHydrationWarning>
+        <p className="text-slate-400 text-sm" suppressHydrationWarning>加载中...</p>
       </div>
     );
   }

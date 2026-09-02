@@ -1,184 +1,282 @@
-import { NextRequest, NextResponse } from 'next/server';
-import prisma from '@/lib/db';
-import { withAuth, successResponse, errorResponse } from '@/lib/api-utils';
-import { z } from 'zod';
-import { Prisma } from '@prisma/client';
-import Decimal from 'decimal.js';
-import { randomInt } from 'node:crypto';
-import { resolveBaseUrl } from '@/lib/payment/config';
-import { canAccessStore, canWriteAtStore, resolveStoreAccess } from '@/lib/store-access';
+import { NextRequest, NextResponse } from "next/server";
+import prisma from "@/lib/db";
+import { successResponse, errorResponse } from "@/lib/api-utils";
+import { withRateLimitedAuth } from "@/lib/security/api-guard";
+import { z } from "zod";
+import { Prisma } from "@prisma/client";
+import Decimal from "decimal.js";
+import { resolveBaseUrl } from "@/lib/payment/config";
+import { canAccessStore, canWriteAtStore, resolveStoreAccess } from "@/lib/store-access";
+import { generateQrCodeValue } from "@/lib/qrcode/code";
+import { buildAggregatePayUrl } from "@/lib/qrcode/url";
+import { parsePayAmount } from "@/lib/qrcode/amount";
+import {
+  counterBelongsToStore,
+  operatorAllowedForStore,
+} from "@/lib/qrcode/access";
+import {
+  loadQrBindings,
+  presentQrCode,
+  QR_READ_ROLES,
+  QR_WRITE_ROLES,
+} from "@/lib/qrcode/owned";
 
-const createQRSchema = z.object({
-  type: z.enum(['FIXED', 'DYNAMIC']),
-  name: z.string().min(1).max(100),
-  // 聚合收款码必须绑定分店，保证分店独立归属
-  storeId: z.string().min(1, '请选择分店'),
-  departmentId: z.string().optional(),
-  counterId: z.string().optional(),
-  amount: z.number().positive().max(1000000).refine(
-    value => new Decimal(value).decimalPlaces() <= 2,
-    '金额最多保留两位小数'
-  ).optional(), // 动态码固定金额
-}).superRefine((data, ctx) => {
-  if (data.type === 'FIXED' && data.amount !== undefined) {
-    ctx.addIssue({ code: 'custom', path: ['amount'], message: '固定入口码由顾客输入金额' });
-  }
-  if (data.type === 'DYNAMIC' && data.amount === undefined) {
-    ctx.addIssue({ code: 'custom', path: ['amount'], message: '动态订单码必须指定金额' });
-  }
-});
+const amountField = z
+  .number()
+  .positive()
+  .max(1000000)
+  .refine(
+    (value) => new Decimal(value).decimalPlaces() <= 2,
+    "金额最多保留两位小数",
+  );
 
-// 生成二维码编号
-// 随机段使用无歧义字符集（去除 I/O/0/1），避免人工抄录或扫码识别时 O/0、I/1 混淆导致访问错误 code
-function generateQRCode(): string {
-  const now = new Date();
-  const date = now.toISOString().slice(0, 10).replace(/-/g, '');
-  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let rand = '';
-  for (let i = 0; i < 10; i++) {
-    rand += alphabet[randomInt(0, alphabet.length)];
-  }
-  return `QR${date}${rand}`;
-}
+const createQRSchema = z
+  .object({
+    type: z.enum(["FIXED", "DYNAMIC"]),
+    name: z.string().min(1).max(100),
+    storeId: z.string().min(1, "请选择分店"),
+    departmentId: z.string().optional(),
+    counterId: z.string().optional(),
+    operatorId: z.string().optional(),
+    amount: amountField.optional(),
+    fixedAmount: amountField.optional(),
+  })
+  .superRefine((data, ctx) => {
+    const fixed = data.amount ?? data.fixedAmount;
+    if (data.type === "FIXED" && fixed === undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["amount"],
+        message: "固定收款码必须填写固定金额",
+      });
+    }
+    if (data.type === "DYNAMIC" && fixed !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["amount"],
+        message: "动态收款码金额由顾客扫码后输入",
+      });
+    }
+  });
 
-// 创建收款码
 export async function POST(request: NextRequest) {
-  return withAuth(request, async (req, ctx) => {
-    const body = await req.json();
-    const validation = createQRSchema.safeParse(body);
+  return withRateLimitedAuth(
+    request,
+    async (req, ctx) => {
+      const body = await req.json();
+      const validation = createQRSchema.safeParse(body);
+      if (!validation.success) {
+        return NextResponse.json(
+          { error: "数据验证失败", details: validation.error.issues },
+          { status: 400 },
+        );
+      }
 
-    if (!validation.success) {
-      return NextResponse.json({ error: '数据验证失败', details: validation.error.issues }, { status: 400 });
-    }
+      const data = validation.data;
+      const merchantId = ctx.user.merchantId!;
+      const scope = await resolveStoreAccess(ctx.user);
+      if (!canWriteAtStore(scope, data.storeId)) {
+        return errorResponse("无权在该分店创建收款码", 403);
+      }
 
-    const data = validation.data;
-    const merchantId = ctx.user.merchantId!;
-    const scope = await resolveStoreAccess(ctx.user);
-    if (!canWriteAtStore(scope, data.storeId)) {
-      return errorResponse('无权在该分店创建收款码', 403);
-    }
-
-    // 验证门店归属（必须属于当前商户，不能串店）
-    const store = await prisma.store.findFirst({
-      where: { id: data.storeId, brand: { merchantId } },
-    });
-    if (!store) {
-      return errorResponse('门店不存在或不属于当前商户', 400);
-    }
-    if (!store.isActive) {
-      return errorResponse('该门店已停用，请选择其他分店', 400);
-    }
-
-    if (data.departmentId) {
-      const department = await prisma.department.findFirst({
-        where: { id: data.departmentId, storeId: store.id, isActive: true },
+      const store = await prisma.store.findFirst({
+        where: { id: data.storeId, brand: { merchantId } },
+        select: { id: true, isActive: true },
       });
-      if (!department) return errorResponse('部门不存在、不属于该门店或已停用', 400);
-    }
-    if (data.counterId) {
-      const counter = await prisma.counter.findFirst({
-        where: {
-          id: data.counterId,
-          isActive: true,
-          department: {
-            storeId: store.id,
-            ...(data.departmentId ? { id: data.departmentId } : {}),
-          },
-        },
-      });
-      if (!counter) return errorResponse('收银台不存在、不属于该门店或已停用', 400);
-    }
+      if (!store) {
+        return errorResponse("门店不存在或不属于当前商户", 400);
+      }
+      if (!store.isActive) {
+        return errorResponse("该门店已停用，请选择其他分店", 400);
+      }
 
-    // 数据库唯一约束是最终保证；极低概率碰撞时重新生成，避免返回无意义的 500。
-    let qrCode = null;
-    for (let attempt = 0; attempt < 5 && !qrCode; attempt += 1) {
-      try {
-        qrCode = await prisma.qRCode.create({
-          data: {
-            merchantId,
-            code: generateQRCode(),
-            type: data.type,
-            name: data.name,
-            storeId: data.storeId,
-            departmentId: data.departmentId,
-            counterId: data.counterId,
-            amount: data.type === 'DYNAMIC' ? data.amount : null,
-            expiredAt: data.type === 'DYNAMIC' ? new Date(Date.now() + 24 * 60 * 60 * 1000) : null,
-          },
+      let departmentId = data.departmentId || null;
+      if (departmentId) {
+        const department = await prisma.department.findFirst({
+          where: { id: departmentId, storeId: store.id, isActive: true },
         });
-      } catch (error) {
-        if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
-          throw error;
+        if (!department) {
+          return errorResponse("部门不存在、不属于该门店或已停用", 400);
         }
       }
-    }
-    if (!qrCode) return errorResponse('收款码编号生成失败，请重试', 503);
 
-    const payUrl = `${resolveBaseUrl(req.headers)}/pay/${qrCode.code}`;
+      if (data.counterId) {
+        const counter = await prisma.counter.findFirst({
+          where: { id: data.counterId },
+          select: {
+            id: true,
+            isActive: true,
+            departmentId: true,
+            department: { select: { storeId: true } },
+          },
+        });
+        if (
+          !counter ||
+          !counterBelongsToStore({
+            counterStoreId: counter.department.storeId,
+            storeId: store.id,
+            counterActive: counter.isActive,
+          })
+        ) {
+          return errorResponse("收银台不存在、不属于该门店或已停用", 400);
+        }
+        if (departmentId && counter.departmentId !== departmentId) {
+          return errorResponse("收银台不属于指定部门", 400);
+        }
+        departmentId = counter.departmentId;
+      }
 
-    return successResponse({
-      ...qrCode,
-      payUrl,
-    }, '收款码创建成功');
-  }, ['MERCHANT_OWNER', 'MERCHANT_ADMIN', 'STORE_MANAGER', 'CASHIER']);
+      if (data.operatorId) {
+        const operator = await prisma.merchantMember.findFirst({
+          where: { id: data.operatorId, merchantId },
+          select: {
+            id: true,
+            isActive: true,
+            role: true,
+            merchantId: true,
+            storeAccesses: { select: { storeId: true } },
+          },
+        });
+        if (
+          !operator ||
+          !operatorAllowedForStore({
+            operatorMerchantId: operator.merchantId,
+            qrMerchantId: merchantId,
+            storeId: store.id,
+            operatorActive: operator.isActive,
+            operatorRole: operator.role,
+            operatorStoreIds: operator.storeAccesses.map((item) => item.storeId),
+          })
+        ) {
+          return errorResponse("员工不存在或不属于该门店合法范围", 400);
+        }
+      }
+
+      let amount: Decimal | null = null;
+      if (data.type === "FIXED") {
+        const parsed = parsePayAmount(data.amount ?? data.fixedAmount);
+        if (!parsed.ok) return errorResponse(parsed.error, 400);
+        amount = parsed.amount;
+      }
+
+      let qrCode = null;
+      for (let attempt = 0; attempt < 5 && !qrCode; attempt += 1) {
+        try {
+          qrCode = await prisma.qRCode.create({
+            data: {
+              merchantId,
+              code: generateQrCodeValue(),
+              type: data.type,
+              name: data.name,
+              storeId: data.storeId,
+              departmentId,
+              counterId: data.counterId || null,
+              operatorId: data.operatorId || null,
+              amount,
+              expiredAt: null,
+            },
+          });
+        } catch (error) {
+          if (
+            !(error instanceof Prisma.PrismaClientKnownRequestError) ||
+            error.code !== "P2002"
+          ) {
+            throw error;
+          }
+        }
+      }
+      if (!qrCode) return errorResponse("收款码编号生成失败，请重试", 503);
+
+      const payUrl = buildAggregatePayUrl(resolveBaseUrl(req.headers), qrCode.code);
+      return successResponse({ ...qrCode, payUrl }, "收款码创建成功");
+    },
+    [...QR_WRITE_ROLES],
+    "qr",
+  );
 }
 
-// 查询收款码列表
 export async function GET(request: NextRequest) {
-  return withAuth(request, async (req, ctx) => {
-    const merchantId = ctx.user.merchantId!;
-    const url = new URL(req.url);
-    const storeId = url.searchParams.get('storeId');
-    const type = url.searchParams.get('type');
-    const scope = await resolveStoreAccess(ctx.user);
+  return withRateLimitedAuth(
+    request,
+    async (req, ctx) => {
+      const merchantId = ctx.user.merchantId!;
+      const url = new URL(req.url);
+      const storeId = url.searchParams.get("storeId");
+      const type = url.searchParams.get("type");
+      const scope = await resolveStoreAccess(ctx.user);
 
-    if (storeId && !canAccessStore(scope, storeId)) {
-      return errorResponse('无权查看该分店收款码', 403);
-    }
+      if (storeId && !canAccessStore(scope, storeId)) {
+        return errorResponse("无权查看该分店收款码", 403);
+      }
 
-    const where: Record<string, unknown> = { merchantId };
-    if (storeId) where.storeId = storeId;
-    else if (!scope.unrestricted) where.storeId = { in: scope.storeIds };
-    if (type) where.type = type;
+      const where: Record<string, unknown> = { merchantId };
+      if (storeId) where.storeId = storeId;
+      else if (!scope.unrestricted) where.storeId = { in: scope.storeIds };
+      if (type) where.type = type;
 
-    const qrCodes = await prisma.qRCode.findMany({
-      where,
-      include: {
-        merchant: { select: { companyName: true } },
-        store: { select: { id: true, name: true, brand: { select: { name: true } } } },
-      },
-      orderBy: { createdAt: 'desc' },
-    });
-
-    const qrIds = qrCodes.map((qr) => qr.id);
-    const paidStats = qrIds.length
-      ? await prisma.order.groupBy({
-          by: ['qrcodeId'],
-          where: {
-            merchantId,
-            qrcodeId: { in: qrIds },
-            status: 'PAID',
+      const qrCodes = await prisma.qRCode.findMany({
+        where,
+        include: {
+          merchant: { select: { companyName: true, merchantNo: true } },
+          store: {
+            select: { id: true, name: true, isActive: true, brand: { select: { name: true } } },
           },
-          _count: true,
-          _sum: { amount: true },
-        })
-      : [];
-    const statsMap = new Map(
-      paidStats.map((row) => [
-        row.qrcodeId,
-        { paidOrderCount: row._count, paidAmount: Number(row._sum.amount || 0) },
-      ]),
-    );
+        },
+        orderBy: { createdAt: "desc" },
+      });
 
-    const baseUrl = resolveBaseUrl(req.headers);
+      const qrIds = qrCodes.map((qr) => qr.id);
+      const paidStats = qrIds.length
+        ? await prisma.order.groupBy({
+            by: ["qrcodeId"],
+            where: {
+              merchantId,
+              qrcodeId: { in: qrIds },
+              status: "PAID",
+            },
+            _count: true,
+            _sum: { amount: true },
+          })
+        : [];
+      const statsMap = new Map(
+        paidStats.map((row) => [
+          row.qrcodeId,
+          { paidOrderCount: row._count, paidAmount: Number(row._sum.amount || 0) },
+        ]),
+      );
 
-    return successResponse(
-      qrCodes.map(qr => ({
-        ...qr,
-        paidOrderCount: statsMap.get(qr.id)?.paidOrderCount || 0,
-        paidAmount: statsMap.get(qr.id)?.paidAmount || 0,
-        payUrl: `${baseUrl}/pay/${qr.code}`,
-      }))
-    );
-  }, ['MERCHANT_OWNER', 'MERCHANT_ADMIN', 'FINANCE', 'STORE_MANAGER', 'CASHIER']);
+      const counterIds = [...new Set(qrCodes.map((qr) => qr.counterId).filter(Boolean))] as string[];
+      const operatorIds = [...new Set(qrCodes.map((qr) => qr.operatorId).filter(Boolean))] as string[];
+      const [counters, operators] = await Promise.all([
+        counterIds.length
+          ? prisma.counter.findMany({
+              where: { id: { in: counterIds } },
+              select: { id: true, name: true, code: true },
+            })
+          : [],
+        operatorIds.length
+          ? prisma.merchantMember.findMany({
+              where: { id: { in: operatorIds }, merchantId },
+              select: { id: true, name: true, email: true, role: true },
+            })
+          : [],
+      ]);
+      const counterMap = new Map(counters.map((item) => [item.id, item]));
+      const operatorMap = new Map(operators.map((item) => [item.id, item]));
+      const baseUrl = resolveBaseUrl(req.headers);
+
+      return successResponse(
+        qrCodes.map((qr) =>
+          presentQrCode(qr, baseUrl, {
+            counter: qr.counterId ? counterMap.get(qr.counterId) || null : null,
+            operator: qr.operatorId ? operatorMap.get(qr.operatorId) || null : null,
+            paidOrderCount: statsMap.get(qr.id)?.paidOrderCount || 0,
+            paidAmount: statsMap.get(qr.id)?.paidAmount || 0,
+          }),
+        ),
+      );
+    },
+    [...QR_READ_ROLES],
+    "qr",
+  );
 }

@@ -9,6 +9,8 @@ import {
   resolvePaymentEnv,
   resolveBaseUrl,
 } from '@/lib/payment/config';
+import { resolvePaymentFmNotifyUrl } from '@/lib/payment/paymentfm-config';
+import { buildPaymentFmAttach } from '@/lib/payment/paymentfm';
 import { z } from 'zod';
 import Decimal from 'decimal.js';
 import { validateOrderContext } from '@/lib/payment/order-context';
@@ -25,7 +27,9 @@ const createOrderSchema = z.object({
     'ALIPAY_BAR', 'ALIPAY_PC', 'ALIPAY_WAP',
     'WECHAT_NATIVE', 'WECHAT_H5', 'WECHAT_JSAPI', 'WECHAT_MINI',
     'UNIONPAY_GATEWAY', 'UNIONPAY_WAP', 'UNIONPAY_QR',
+    'PAYMENTFM_AGGREGATE',
   ]),
+  walletType: z.enum(['WECHAT', 'ALIPAY', 'UNIONPAY']).optional(),
   scene: z.enum(['QR_CODE', 'CASHIER', 'ONLINE', 'H5', 'MINI_PROGRAM', 'APP']),
   brandId: z.string().optional(),
   storeId: z.string().optional(),
@@ -90,10 +94,14 @@ export async function POST(request: NextRequest) {
     if (!paymentConfig) {
       return errorResponse('该支付渠道尚未配置或未启用', 400);
     }
+    if (data.channel === 'PAYMENTFM_AGGREGATE' && !data.walletType) {
+      return errorResponse('聚合支付必须指定 walletType：WECHAT / ALIPAY / UNIONPAY', 400);
+    }
     if (
       !data.channel.startsWith('ALIPAY') &&
       !data.channel.startsWith('WECHAT') &&
-      !data.channel.startsWith('UNIONPAY')
+      !data.channel.startsWith('UNIONPAY') &&
+      data.channel !== 'PAYMENTFM_AGGREGATE'
     ) {
       return errorResponse(`不支持的支付渠道: ${data.channel}`, 400);
     }
@@ -125,6 +133,7 @@ export async function POST(request: NextRequest) {
         currency: 'CNY',
         channel: data.channel,
         scene: data.scene,
+        walletType: data.channel === 'PAYMENTFM_AGGREGATE' ? data.walletType : undefined,
         status: 'CREATED',
         qrcodeId: data.qrcodeId,
         expiredAt,
@@ -157,9 +166,11 @@ export async function POST(request: NextRequest) {
       }
 
       // 根据渠道类型调用 Provider（实例化统一通过 resolveProvider 收口）
-      const notifyUrl = data.channel.startsWith('ALIPAY')
-        ? resolveAlipayNotifyUrl(req.headers, paymentConfig.notifyUrl)
-        : resolveChannelNotifyPath(data.channel, baseUrl);
+      const notifyUrl = data.channel === 'PAYMENTFM_AGGREGATE'
+        ? resolvePaymentFmNotifyUrl(req.headers, paymentConfig.notifyUrl)
+        : data.channel.startsWith('ALIPAY')
+          ? resolveAlipayNotifyUrl(req.headers, paymentConfig.notifyUrl)
+          : resolveChannelNotifyPath(data.channel, baseUrl);
 
       const payResult = await resolved.provider.createPayment({
         orderNo,
@@ -169,7 +180,17 @@ export async function POST(request: NextRequest) {
         notifyUrl,
         returnUrl: data.returnUrl,
         clientIp: data.clientIp,
-        extraParams: data.extraParams,
+        extraParams: data.channel === 'PAYMENTFM_AGGREGATE'
+          ? {
+              ...data.extraParams,
+              walletType: data.walletType || data.extraParams?.walletType || '',
+              attch: data.extraParams?.attch || buildPaymentFmAttach({
+                storeId: data.storeId,
+                qrcodeId: data.qrcodeId,
+                operatorId: ctx.user.sub,
+              }),
+            }
+          : data.extraParams,
       });
 
       if (payResult.success && payResult.payData) {

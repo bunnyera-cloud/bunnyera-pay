@@ -90,6 +90,8 @@ export interface OrderQueryResult {
   verified?: boolean;
   /** 渠道返回金额，整数最小货币单位；CNY 为分 */
   amount?: number;
+  /** ISO currency from the official query, when the channel reports one */
+  currency?: string;
   tradeNo?: string;
   paidAt?: Date;
 }

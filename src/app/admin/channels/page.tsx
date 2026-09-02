@@ -80,6 +80,13 @@ const channels = [
     status: "draft",
     desc: "尚未接入 Provider Adapter",
   },
+  {
+    name: "支付FM聚合",
+    code: "PAYMENTFM_AGGREGATE",
+    category: "聚合",
+    status: "pending",
+    desc: "BunnyEra 自有码 + 支付FM 下单/查单/通知；生产凭证未开通",
+  },
 ];
 
 export default function AdminChannelsPage() {

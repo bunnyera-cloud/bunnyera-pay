@@ -166,6 +166,6 @@ export async function GET(request: NextRequest) {
       });
       return successResponse(members);
     },
-    ["MERCHANT_OWNER", "MERCHANT_ADMIN"],
+    ["MERCHANT_OWNER", "MERCHANT_ADMIN", "STORE_MANAGER"],
   );
 }

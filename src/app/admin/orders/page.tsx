@@ -33,8 +33,10 @@ const statusMap: Record<string, { label: string; color: string }> = {
 const channelLabels: Record<string, string> = {
   ALIPAY_BAR: '支付宝条码', ALIPAY_PC: '支付宝PC', ALIPAY_WAP: '支付宝WAP',
   WECHAT_NATIVE: '微信Native', WECHAT_H5: '微信H5', WECHAT_JSAPI: '微信JSAPI', WECHAT_MINI: '微信小程序',
+  WECHAT_EXTERNAL_QR: '微信支付（人工确认）',
   UNIONPAY_GATEWAY: '银联网关', UNIONPAY_WAP: '银联WAP', UNIONPAY_QR: '银联二维码',
   LAKALA_AGGREGATE: '拉卡拉聚合',
+  PAYMENTFM_AGGREGATE: '支付FM聚合',
 };
 
 export default function AdminOrdersPage() {

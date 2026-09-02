@@ -51,7 +51,8 @@ export async function POST(
         order.paymentEnv === "PREVIEW" ||
         (!order.channel.startsWith("ALIPAY") &&
           !order.channel.startsWith("WECHAT") &&
-          !order.channel.startsWith("UNIONPAY"))
+          !order.channel.startsWith("UNIONPAY") &&
+          order.channel !== "PAYMENTFM_AGGREGATE")
       ) {
         if (order.paymentEnv === "PREVIEW" && isExpired) {
           await prisma.order.updateMany({
@@ -132,7 +133,11 @@ export async function POST(
         });
       }
 
-      if (result.status === "CLOSED" && order.status !== "PAID") {
+      if (
+        result.status === "CLOSED" &&
+        result.verified === true &&
+        order.status !== "PAID"
+      ) {
         await prisma.order.update({
           where: { id: order.id },
           data: { status: "CLOSED", closedAt: new Date() },

@@ -19,7 +19,7 @@ export default function LoginPage() {
     setLoading(true);
 
     try {
-      const endpoint = tab === 'platform' ? '/api/auth/platform' : '/api/auth/merchant';
+      const endpoint = tab === 'platform' ? '/api/auth/platform/login' : '/api/auth/merchant/login';
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -32,18 +32,19 @@ export default function LoginPage() {
         return;
       }
 
-      if (!data.success || !data.token) {
+      const payload = data.data ?? data;
+      if (!data.success || !payload.token || !payload.user) {
         setError('登录失败，请重试');
         return;
       }
 
       if (tab === 'platform') {
-        localStorage.setItem('bep_platform_token', data.token);
-        localStorage.setItem('bep_platform_user', JSON.stringify(data.user));
+        localStorage.setItem('bep_platform_token', payload.token);
+        localStorage.setItem('bep_platform_user', JSON.stringify(payload.user));
         router.push('/admin/dashboard');
       } else {
-        localStorage.setItem('bep_merchant_token', data.token);
-        localStorage.setItem('bep_merchant_user', JSON.stringify(data.user));
+        localStorage.setItem('bep_merchant_token', payload.token);
+        localStorage.setItem('bep_merchant_user', JSON.stringify(payload.user));
         router.push('/dashboard');
       }
     } catch {

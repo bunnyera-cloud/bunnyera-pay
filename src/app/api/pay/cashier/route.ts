@@ -2,12 +2,23 @@ import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/db';
 import { successResponse, errorResponse } from '@/lib/api-utils';
 import { generateOrderNo } from '@/lib/auth';
+import { getClientIp } from '@/lib/security/client-ip';
+import { rateLimitResponse } from '@/lib/security/rate-limit';
+import {
+  limitCashierGet,
+  limitCashierMerchant,
+  limitCashierPost,
+  limitIllegalCashierAmount,
+  limitQrEnumeration,
+} from '@/lib/security/cashier-guard';
 import { resolveProvider } from '@/lib/payment/resolver';
 import {
   resolveAlipayNotifyUrl,
   resolvePaymentEnv,
   resolveBaseUrl,
 } from '@/lib/payment/config';
+import { resolvePaymentFmNotifyUrl } from '@/lib/payment/paymentfm-config';
+import { buildPaymentFmAttach, isPaymentFmWalletType } from '@/lib/payment/paymentfm';
 import {
   MANUAL_CONFIRMATION_REQUIRED,
   canStartNewProviderPayment,
@@ -16,6 +27,11 @@ import {
 } from '@/lib/payment/channel-policy';
 import { z } from 'zod';
 import Decimal from 'decimal.js';
+import { evaluateAggregateQrScan } from '@/lib/qrcode/scan';
+import { resolveQrPayAmount } from '@/lib/qrcode/amount';
+import { listAvailablePaymentFmWallets, orderAttributionFromQr } from '@/lib/qrcode/wallets';
+import { cashierDuplicateInFlight, isReusableCashierOrder } from '@/lib/qrcode/idempotency';
+import { isMissingOrderWalletType } from '@/lib/payment/schema-compat';
 
 /**
  * 聚合收款码收银台 API（顾客扫码访问，无需商户登录态）。
@@ -30,7 +46,8 @@ const cashierPaySchema = z.object({
     value => new Decimal(value).decimalPlaces() <= 2,
     '金额最多保留两位小数'
   ).optional(),
-  channel: z.enum(['ALIPAY_BAR', 'WECHAT_NATIVE', 'UNIONPAY_QR', 'WECHAT_EXTERNAL_QR']),
+  channel: z.enum(['ALIPAY_BAR', 'WECHAT_NATIVE', 'UNIONPAY_QR', 'WECHAT_EXTERNAL_QR', 'PAYMENTFM_AGGREGATE']),
+  walletType: z.enum(['WECHAT', 'ALIPAY', 'UNIONPAY']).optional(),
 });
 
 function isDirectImageSource(value: string): boolean {
@@ -39,6 +56,7 @@ function isDirectImageSource(value: string): boolean {
 
 // 创建收银订单
 export async function POST(request: NextRequest): Promise<NextResponse> {
+  const ip = getClientIp(request) || 'unknown';
   let body: unknown;
   try {
     body = await request.json();
@@ -47,13 +65,27 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
   const validation = cashierPaySchema.safeParse(body);
   if (!validation.success) {
+    const rawCode =
+      body && typeof body === 'object' && 'code' in body
+        ? String((body as { code?: unknown }).code || '')
+        : '';
+    const amountInvalid = validation.error.issues.some((issue) => issue.path.includes('amount'));
+    if (amountInvalid) {
+      const blocked = await limitIllegalCashierAmount({ ip, code: rawCode || undefined });
+      if (blocked) return rateLimitResponse(blocked);
+    }
     return NextResponse.json(
       { success: false, error: '数据验证失败', details: validation.error.issues },
       { status: 400 }
     );
   }
   const data = validation.data;
+  const postLimit = await limitCashierPost({ ip, code: data.code });
+  if (postLimit) return rateLimitResponse(postLimit);
   const manualChannel = isManualConfirmationChannel(data.channel);
+  if (data.channel === 'PAYMENTFM_AGGREGATE' && !isPaymentFmWalletType(data.walletType || '')) {
+    return errorResponse('聚合支付必须指定 walletType：WECHAT / ALIPAY / UNIONPAY', 400);
+  }
 
   // 查找收款码
   const qrCode = await prisma.qRCode.findUnique({
@@ -63,39 +95,39 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     },
   });
 
-  if (!qrCode || !qrCode.isActive) {
-    return errorResponse('收款码不存在或已停用', 404);
+  if (!qrCode) {
+    const enumerated = await limitQrEnumeration({ ip, code: data.code });
+    if (enumerated) return rateLimitResponse(enumerated);
+    return errorResponse('收款码不存在', 404);
   }
-  if (qrCode.expiredAt && qrCode.expiredAt.getTime() < Date.now()) {
-    return errorResponse('收款码已过期', 400);
-  }
-  // 聚合码必须绑定分店
-  if (!qrCode.storeId) {
-    return errorResponse('该收款码未绑定分店，无法收款', 400);
-  }
-  const store = await prisma.store.findUnique({
-    where: { id: qrCode.storeId },
-    select: {
-      id: true,
-      isActive: true,
-      brandId: true,
-      brand: { select: { merchantId: true } },
-    },
+  const merchantLimit = await limitCashierMerchant(qrCode.merchantId);
+  if (merchantLimit) return rateLimitResponse(merchantLimit);
+  const store = qrCode.storeId
+    ? await prisma.store.findUnique({
+        where: { id: qrCode.storeId },
+        select: {
+          id: true,
+          isActive: true,
+          brandId: true,
+          brand: { select: { merchantId: true } },
+        },
+      })
+    : null;
+  const scan = evaluateAggregateQrScan({
+    qr: qrCode,
+    merchant: qrCode.merchant,
+    store: store
+      ? { isActive: store.isActive, merchantId: store.brand.merchantId }
+      : null,
   });
+  if (!scan.ok) {
+    return errorResponse(scan.error, scan.status);
+  }
   if (!store) {
-    return errorResponse('收款码绑定的分店不存在', 400);
-  }
-  if (!store.isActive) {
-    return errorResponse('该分店已停用，无法收款', 400);
-  }
-  if (store.brand.merchantId !== qrCode.merchantId) {
-    return errorResponse('收款码与分店归属不一致', 400);
+    return errorResponse('该收款码未绑定分店，无法收款', 400);
   }
 
   const merchant = qrCode.merchant;
-  if (merchant.status !== 'ACTIVE') {
-    return errorResponse('商户不可用', 403);
-  }
   if (!manualChannel) {
     const paymentGate = canStartNewProviderPayment(data.channel, merchant.kybStatus);
     if (!paymentGate.ok) {
@@ -103,16 +135,64 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     }
   }
 
-  // 固定入口码由顾客输入金额；动态订单码金额由服务端收款码记录决定。
-  const amount = qrCode.type === 'DYNAMIC' ? Number(qrCode.amount) : data.amount;
-  if (!amount || amount <= 0) {
-    return errorResponse('请输入支付金额', 400);
+  const amountResult = resolveQrPayAmount({
+    type: qrCode.type,
+    qrAmount: qrCode.amount,
+    clientAmount: data.amount,
+  });
+  if (!amountResult.ok) {
+    const blocked = await limitIllegalCashierAmount({ ip, code: data.code });
+    if (blocked) return rateLimitResponse(blocked);
+    return errorResponse(amountResult.error, 400);
   }
-  if (new Decimal(amount).decimalPlaces() > 2 || amount > 1000000) {
-    return errorResponse('支付金额格式错误', 400);
+  const amount = amountResult.amount.toNumber();
+  const attribution = orderAttributionFromQr(qrCode);
+  const reusableWhere = {
+    merchantId: merchant.id,
+    qrcodeId: qrCode.id,
+    channel: data.channel,
+    amount: amountResult.amount.toFixed(2),
+    status: { in: ['CREATED' as const, 'PAYING' as const] },
+    expiredAt: { gt: new Date() },
+  };
+  let reusable;
+  try {
+    reusable = await prisma.order.findFirst({
+      where: {
+        ...reusableWhere,
+        walletType: data.walletType ?? null,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  } catch (error) {
+    if (!isMissingOrderWalletType(error)) throw error;
+    reusable = await prisma.order.findFirst({
+      where: reusableWhere,
+      orderBy: { createdAt: 'desc' },
+    });
   }
-  if (qrCode.type === 'DYNAMIC' && qrCode.orderId) {
-    return errorResponse('该动态收款码已创建过订单', 409);
+  if (
+    reusable &&
+    isReusableCashierOrder(reusable, {
+      qrcodeId: qrCode.id,
+      amount: amountResult.amount.toFixed(2),
+      channel: data.channel,
+      walletType: data.walletType,
+    })
+  ) {
+    if (cashierDuplicateInFlight(reusable)) {
+      return errorResponse('支付单正在创建，请勿重复提交', 409);
+    }
+    if (reusable.payData) {
+      return successResponse({
+        orderNo: reusable.orderNo,
+        status: reusable.status,
+        payData: reusable.payData,
+        paymentEnv: reusable.paymentEnv,
+        confirmationMode: reusable.confirmationMode,
+        statusToken: reusable.id,
+      });
+    }
   }
 
   if (manualChannel) {
@@ -130,47 +210,30 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     }
 
     const orderNo = generateOrderNo();
-    let order;
-    try {
-      order = await prisma.$transaction(async tx => {
-        const created = await tx.order.create({
-          data: {
-            orderNo,
-            merchantId: merchant.id,
-            brandId: store.brandId,
-            storeId: store.id,
-            departmentId: qrCode.departmentId,
-            counterId: qrCode.counterId,
-            qrcodeId: qrCode.id,
-            subject: qrCode.name || `${merchant.companyName}收款`,
-            amount,
-            currency: 'CNY',
-            channel: data.channel,
-            scene: 'QR_CODE',
-            status: 'PAYING',
-            paymentEnv: 'MANUAL',
-            confirmationMode: MANUAL_CONFIRMATION_REQUIRED,
-            payData: target.targetUrl || target.qrImageUrl,
-            expiredAt: new Date(Date.now() + 15 * 60 * 1000),
-            clientIp: getClientIp(request),
-            userAgent: request.headers.get('user-agent'),
-          },
-        });
-        if (qrCode.type === 'DYNAMIC') {
-          const claimed = await tx.qRCode.updateMany({
-            where: { id: qrCode.id, orderId: null },
-            data: { orderId: created.id },
-          });
-          if (claimed.count === 0) throw new Error('DYNAMIC_QR_ALREADY_USED');
-        }
-        return created;
-      });
-    } catch (error) {
-      if ((error as Error).message === 'DYNAMIC_QR_ALREADY_USED') {
-        return errorResponse('该动态收款码已创建过订单', 409);
-      }
-      throw error;
-    }
+    const order = await prisma.order.create({
+      data: {
+        orderNo,
+        merchantId: merchant.id,
+        brandId: store.brandId,
+        storeId: store.id,
+        departmentId: attribution.departmentId,
+        counterId: attribution.counterId,
+        operatorId: attribution.operatorId,
+        qrcodeId: attribution.qrcodeId,
+        subject: qrCode.name || `${merchant.companyName}收款`,
+        amount,
+        currency: 'CNY',
+        channel: data.channel,
+        scene: 'QR_CODE',
+        status: 'PAYING',
+        paymentEnv: 'MANUAL',
+        confirmationMode: MANUAL_CONFIRMATION_REQUIRED,
+        payData: target.targetUrl || target.qrImageUrl,
+        expiredAt: new Date(Date.now() + 15 * 60 * 1000),
+        clientIp: getClientIp(request),
+        userAgent: request.headers.get('user-agent'),
+      },
+    });
 
     const payImageUrl = target.qrImageUrl && isDirectImageSource(target.qrImageUrl)
       ? target.qrImageUrl
@@ -215,47 +278,41 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   if (!resolved.provider || !resolved.usable) {
     return errorResponse('该支付方式未开通', 400);
   }
-
-  // 创建订单：写入 merchantId / brandId / storeId / qrcodeId / channel
-  const orderNo = generateOrderNo();
-  let order;
-  try {
-    order = await prisma.$transaction(async tx => {
-      const created = await tx.order.create({
-        data: {
-          orderNo,
-          merchantId: merchant.id,
-          brandId: store.brandId,
-          storeId: store.id,
-          departmentId: qrCode.departmentId,
-          counterId: qrCode.counterId,
-          qrcodeId: qrCode.id,
-          subject: qrCode.name || `${merchant.companyName}收款`,
-          amount,
-          currency: 'CNY',
-          channel: data.channel,
-          scene: 'QR_CODE',
-          status: 'CREATED',
-          expiredAt: new Date(Date.now() + 15 * 60 * 1000),
-          clientIp: getClientIp(request),
-          userAgent: request.headers.get('user-agent'),
-        },
-      });
-      if (qrCode.type === 'DYNAMIC') {
-        const claimed = await tx.qRCode.updateMany({
-          where: { id: qrCode.id, orderId: null },
-          data: { orderId: created.id },
-        });
-        if (claimed.count === 0) throw new Error('DYNAMIC_QR_ALREADY_USED');
-      }
-      return created;
+  if (data.channel === 'PAYMENTFM_AGGREGATE') {
+    const wallets = listAvailablePaymentFmWallets({
+      paymentFmUsable: resolved.usable,
+      merchantChannelEnabled: merchantChannel?.isEnabled === true,
+      policyAllows: canStartNewProviderPayment(data.channel, merchant.kybStatus).ok,
+      extraConfig: paymentConfig.extraConfig,
     });
-  } catch (error) {
-    if ((error as Error).message === 'DYNAMIC_QR_ALREADY_USED') {
-      return errorResponse('该动态收款码已创建过订单', 409);
+    if (!data.walletType || !wallets.includes(data.walletType)) {
+      return errorResponse('该钱包未开通', 400);
     }
-    throw error;
   }
+
+  const orderNo = generateOrderNo();
+  const order = await prisma.order.create({
+    data: {
+      orderNo,
+      merchantId: merchant.id,
+      brandId: store.brandId,
+      storeId: store.id,
+      departmentId: attribution.departmentId,
+      counterId: attribution.counterId,
+      operatorId: attribution.operatorId,
+      qrcodeId: attribution.qrcodeId,
+      subject: qrCode.name || `${merchant.companyName}收款`,
+      amount,
+      currency: 'CNY',
+      channel: data.channel,
+      scene: 'QR_CODE',
+      walletType: data.channel === 'PAYMENTFM_AGGREGATE' ? data.walletType : undefined,
+      status: 'CREATED',
+      expiredAt: new Date(Date.now() + 15 * 60 * 1000),
+      clientIp: getClientIp(request),
+      userAgent: request.headers.get('user-agent'),
+    },
+  });
 
   const paymentEnv = resolvePaymentEnv();
   const baseUrl = resolveBaseUrl(request.headers);
@@ -279,9 +336,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   // 调用真实支付渠道
   try {
-    const notifyUrl = data.channel.startsWith('ALIPAY')
-      ? resolveAlipayNotifyUrl(request.headers, paymentConfig.notifyUrl)
-      : resolveChannelNotifyPath(data.channel, baseUrl);
+    const notifyUrl = data.channel === 'PAYMENTFM_AGGREGATE'
+      ? resolvePaymentFmNotifyUrl(request.headers, paymentConfig.notifyUrl)
+      : data.channel.startsWith('ALIPAY')
+        ? resolveAlipayNotifyUrl(request.headers, paymentConfig.notifyUrl)
+        : resolveChannelNotifyPath(data.channel, baseUrl);
 
     const payResult = await resolved.provider.createPayment({
       orderNo,
@@ -289,6 +348,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       subject: order.subject,
       currency: 'CNY',
       notifyUrl,
+      extraParams: data.channel === 'PAYMENTFM_AGGREGATE'
+        ? {
+            walletType: data.walletType || '',
+            attch: buildPaymentFmAttach({
+              storeId: store.id,
+              qrcodeId: qrCode.id,
+              operatorId: attribution.operatorId,
+            }),
+          }
+        : undefined,
     });
 
     if (payResult.success && payResult.payData) {
@@ -325,8 +394,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
 // 收银台订单状态轮询（公开接口，仅返回最小字段）
 export async function GET(request: NextRequest): Promise<NextResponse> {
+  const ip = getClientIp(request) || 'unknown';
   const orderNo = new URL(request.url).searchParams.get('orderNo');
   const statusToken = new URL(request.url).searchParams.get('statusToken');
+  const getLimit = await limitCashierGet({ ip, orderNo: orderNo || undefined });
+  if (getLimit) return rateLimitResponse(getLimit);
   if (!orderNo || !statusToken) {
     return errorResponse('缺少订单状态凭证', 400);
   }
@@ -356,9 +428,4 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     expired: order.expiredAt ? order.expiredAt.getTime() < Date.now() : false,
     confirmationMode: order.confirmationMode,
   });
-}
-
-function getClientIp(request: NextRequest): string | null {
-  const forwarded = request.headers.get('x-forwarded-for');
-  return forwarded?.split(',')[0]?.trim() || request.headers.get('x-real-ip');
 }

@@ -101,3 +101,19 @@ test("WeChat external QR is manual confirmation and never a WeChat Pay API", () 
     "https://pay.example/api/pay/wechat/notify",
   );
 });
+
+test("PaymentFM aggregate uses its own notify path and stays cashier-routable", () => {
+  assert.equal(
+    (CASHIER_ROUTABLE_CHANNELS as readonly string[]).includes("PAYMENTFM_AGGREGATE"),
+    true,
+  );
+  assert.equal(
+    resolveChannelNotifyPath("PAYMENTFM_AGGREGATE", "https://pay.example"),
+    "https://pay.example/api/pay/paymentfm/notify",
+  );
+  assert.deepEqual(canAuthorizeNewPayments("PAYMENTFM_AGGREGATE", "APPROVED"), {
+    ok: true,
+  });
+  const blocked = canAuthorizeNewPayments("PAYMENTFM_AGGREGATE", "NOT_SUBMITTED");
+  assert.equal(blocked.ok, false);
+});

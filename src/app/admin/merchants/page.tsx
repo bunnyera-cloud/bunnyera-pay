@@ -16,11 +16,20 @@ interface Merchant {
   country: string;
   businessCategory: string;
   status: string;
+  kybStatus?: string;
+  kybRejectReason?: string | null;
   rejectReason: string | null;
   approvedAt: string | null;
   createdAt: string;
   _count: { orders: number };
 }
+
+const kybMap: Record<string, { label: string; color: string }> = {
+  NOT_SUBMITTED: { label: 'KYB 未提交', color: 'bg-gray-100 text-gray-600' },
+  PENDING: { label: 'KYB 审核中', color: 'bg-amber-100 text-amber-700' },
+  APPROVED: { label: 'KYB 已通过', color: 'bg-emerald-100 text-emerald-700' },
+  REJECTED: { label: 'KYB 已拒绝', color: 'bg-red-100 text-red-700' },
+};
 
 const statusMap: Record<string, { label: string; color: string }> = {
   DRAFT: { label: '草稿', color: 'bg-gray-100 text-gray-600' },
@@ -132,6 +141,33 @@ function MerchantsContent() {
     setActionLoading(false);
   };
 
+  const handleKyb = async (merchant: Merchant, action: 'approve' | 'reject') => {
+    const token = getToken();
+    if (!token) return;
+    const reason = action === 'reject' ? window.prompt('请输入 KYB 拒绝原因') : null;
+    if (action === 'reject' && !reason) return;
+    setActionLoading(true);
+    try {
+      const res = await fetch(`/api/merchants/${merchant.id}/kyb`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(action === 'reject' ? { action, reason } : { action }),
+      });
+      if (res.ok) {
+        fetchMerchants();
+      } else {
+        const json = await res.json();
+        alert(json.error || 'KYB 操作失败');
+      }
+    } catch {
+      alert('KYB 操作失败');
+    }
+    setActionLoading(false);
+  };
+
   const openReview = (m: Merchant, action: string) => {
     setSelectedMerchant(m);
     setReviewAction(action);
@@ -225,6 +261,7 @@ function MerchantsContent() {
                   <th className="text-left px-4 py-3 text-gray-500 font-medium">联系方式</th>
                   <th className="text-left px-4 py-3 text-gray-500 font-medium">行业</th>
                   <th className="text-left px-4 py-3 text-gray-500 font-medium">状态</th>
+                  <th className="text-left px-4 py-3 text-gray-500 font-medium">KYB</th>
                   <th className="text-left px-4 py-3 text-gray-500 font-medium">订单</th>
                   <th className="text-left px-4 py-3 text-gray-500 font-medium">注册时间</th>
                   <th className="text-left px-4 py-3 text-gray-500 font-medium">操作</th>
@@ -233,6 +270,7 @@ function MerchantsContent() {
               <tbody className="divide-y divide-gray-50">
                 {merchants.map(m => {
                   const st = statusMap[m.status] || { label: m.status, color: 'bg-gray-100 text-gray-600' };
+                  const kyb = kybMap[m.kybStatus || 'NOT_SUBMITTED'] || kybMap.NOT_SUBMITTED;
                   return (
                     <tr key={m.id} className="hover:bg-gray-50/50 transition">
                       <td className="px-4 py-3 text-gray-900 font-mono text-xs">{m.merchantNo}</td>
@@ -246,6 +284,11 @@ function MerchantsContent() {
                       <td className="px-4 py-3">
                         <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${st.color}`}>
                           {st.label}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${kyb.color}`}>
+                          {kyb.label}
                         </span>
                       </td>
                       <td className="px-4 py-3 text-gray-600">{m._count.orders}</td>
@@ -267,6 +310,22 @@ function MerchantsContent() {
                               {a.label}
                             </button>
                           ))}
+                          {m.kybStatus === 'PENDING' && (
+                            <>
+                              <button
+                                onClick={() => handleKyb(m, 'approve')}
+                                className="px-2 py-1 text-xs border rounded transition bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100"
+                              >
+                                通过 KYB
+                              </button>
+                              <button
+                                onClick={() => handleKyb(m, 'reject')}
+                                className="px-2 py-1 text-xs border rounded transition bg-red-50 text-red-700 border-red-200 hover:bg-red-100"
+                              >
+                                拒绝 KYB
+                              </button>
+                            </>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -363,6 +422,7 @@ function MerchantsContent() {
                 <div><span className="text-gray-400">邮箱：</span><span className="text-gray-900">{String(detailData.email)}</span></div>
                 <div><span className="text-gray-400">行业：</span><span className="text-gray-900">{String(detailData.businessCategory)}</span></div>
                 <div><span className="text-gray-400">状态：</span><span className="text-gray-900">{String(detailData.status)}</span></div>
+                <div><span className="text-gray-400">KYB：</span><span className="text-gray-900">{String(detailData.kybStatus || 'NOT_SUBMITTED')}</span></div>
               </div>
               {Array.isArray(detailData.members) && (detailData.members as Record<string, unknown>[]).length > 0 && (
                 <div>
@@ -399,6 +459,7 @@ function MerchantsContent() {
                   </div>
                 </div>
               )}
+              <PaymentFmWalletAdmin merchantId={String(detailData.id || selectedMerchant?.id || '')} />
               {detailData.storeStructure ? (
                 <div>
                   <h4 className="text-gray-700 font-medium mt-4 mb-2">
@@ -442,5 +503,112 @@ function MerchantsContent() {
         </div>
       )}
     </AdminLayout>
+  );
+}
+
+function PaymentFmWalletAdmin({ merchantId }: { merchantId: string }) {
+  const [wallets, setWallets] = useState<string[]>([]);
+  const [payTypes, setPayTypes] = useState<string[]>([]);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!merchantId) return;
+    const token = localStorage.getItem('bep_platform_token');
+    if (!token) return;
+    fetch(`/api/merchants/${merchantId}/channels`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }).then(async (res) => {
+      if (!res.ok) return;
+      const json = await res.json();
+      const paymentFm = (json.data || []).find((item: { channel?: string }) => item.channel === 'PAYMENTFM_AGGREGATE');
+      setWallets(Array.isArray(paymentFm?.enabledWallets) ? paymentFm.enabledWallets : ['ALIPAY', 'WECHAT', 'UNIONPAY']);
+      setPayTypes(Array.isArray(paymentFm?.payTypes) ? paymentFm.payTypes : ['aloop', 'tloop', 'bloop']);
+    }).catch(() => undefined);
+  }, [merchantId]);
+
+  const save = async () => {
+    const token = localStorage.getItem('bep_platform_token');
+    if (!token || !merchantId) return;
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/merchants/${merchantId}/channels`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channel: 'PAYMENTFM_AGGREGATE',
+          enabledWallets: wallets,
+          payTypes,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        alert(json.error || '保存失败');
+        return;
+      }
+      alert('PaymentFM 钱包配置已保存');
+    } catch {
+      alert('保存失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const options = [
+    { wallet: 'ALIPAY', payType: 'aloop', label: '支付宝' },
+    { wallet: 'WECHAT', payType: 'tloop', label: '微信' },
+    { wallet: 'UNIONPAY', payType: 'bloop', label: '银联' },
+  ];
+
+  return (
+    <div className="mt-4">
+      <h4 className="text-gray-700 font-medium mb-2">PaymentFM 收银台钱包 / payType</h4>
+      <p className="text-gray-500 text-xs mb-2">两组独立多选。全部关闭并保存后扫码页不展示钱包。空数组不会恢复默认三钱包。</p>
+      <p className="text-gray-600 text-xs mb-1">enabledWallets</p>
+      <div className="flex flex-wrap gap-3 text-sm text-gray-700 mb-3">
+        {options.map((option) => (
+          <label key={option.wallet} className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={wallets.includes(option.wallet)}
+              onChange={() => {
+                setWallets((current) =>
+                  current.includes(option.wallet)
+                    ? current.filter((item) => item !== option.wallet)
+                    : [...current, option.wallet],
+                );
+              }}
+            />
+            {option.label}
+          </label>
+        ))}
+      </div>
+      <p className="text-gray-600 text-xs mb-1">payTypes（仅已确认映射）</p>
+      <div className="flex flex-wrap gap-3 text-sm text-gray-700">
+        {options.map((option) => (
+          <label key={option.payType} className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={payTypes.includes(option.payType)}
+              onChange={() => {
+                setPayTypes((current) =>
+                  current.includes(option.payType)
+                    ? current.filter((item) => item !== option.payType)
+                    : [...current, option.payType],
+                );
+              }}
+            />
+            {option.payType} · {option.label}
+          </label>
+        ))}
+      </div>
+      <button
+        type="button"
+        disabled={saving}
+        onClick={save}
+        className="mt-3 px-3 py-1.5 text-xs bg-blue-600 text-white rounded-lg disabled:opacity-50"
+      >
+        {saving ? '保存中...' : '保存钱包配置'}
+      </button>
+    </div>
   );
 }

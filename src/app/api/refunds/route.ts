@@ -5,6 +5,8 @@ import { withAuth, successResponse, errorResponse } from '@/lib/api-utils';
 import { generateRefundNo } from '@/lib/auth';
 import { recordAuditLog } from '@/lib/audit';
 import { executeChannelRefund, syncChannelRefund } from '@/lib/payment/refund-service';
+import { canAccessStore, resolveStoreAccess, storeIdWhere } from '@/lib/store-access';
+import { isManualConfirmationChannel } from '@/lib/payment/channel-policy';
 import { z } from 'zod';
 import Decimal from 'decimal.js';
 
@@ -34,6 +36,13 @@ export async function POST(request: NextRequest) {
     });
 
     if (!order) return errorResponse('订单不存在', 404);
+    const scope = await resolveStoreAccess(ctx.user);
+    if (!canAccessStore(scope, order.storeId)) {
+      return errorResponse('无权操作该分店订单', 403);
+    }
+    if (isManualConfirmationChannel(order.channel)) {
+      return errorResponse('外部静态收款码订单不支持在线退款', 400);
+    }
     if (order.status !== 'PAID' && order.status !== 'PARTIALLY_REFUNDED') {
       return errorResponse('当前订单状态不支持退款', 400);
     }
@@ -96,7 +105,7 @@ export async function POST(request: NextRequest) {
     }
 
     return successResponse(refund, '退款申请已提交，等待管理员审核');
-  }, ['MERCHANT_OWNER', 'MERCHANT_ADMIN', 'FINANCE', 'CASHIER', 'CUSTOMER_SERVICE']);
+  }, ['MERCHANT_OWNER', 'MERCHANT_ADMIN', 'FINANCE', 'STORE_MANAGER', 'CASHIER', 'CUSTOMER_SERVICE']);
 }
 
 // 查询退款列表
@@ -107,7 +116,12 @@ export async function GET(request: NextRequest) {
     const pageSize = parseInt(url.searchParams.get('pageSize') || '20');
     const status = url.searchParams.get('status');
 
-    const where = { merchantId: ctx.user.merchantId } as Prisma.RefundWhereInput;
+    const scope = await resolveStoreAccess(ctx.user);
+    const storeFilter = storeIdWhere(scope);
+    const where = {
+      merchantId: ctx.user.merchantId,
+      ...(storeFilter ? { order: { storeId: storeFilter } } : {}),
+    } as Prisma.RefundWhereInput;
     if (status) where.status = status as RefundStatus;
 
     const [refunds, total] = await Promise.all([
@@ -128,7 +142,7 @@ export async function GET(request: NextRequest) {
       data: refunds,
       pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) },
     });
-  }, ['MERCHANT_OWNER', 'MERCHANT_ADMIN', 'FINANCE', 'CUSTOMER_SERVICE']);
+  }, ['MERCHANT_OWNER', 'MERCHANT_ADMIN', 'FINANCE', 'STORE_MANAGER', 'CUSTOMER_SERVICE']);
 }
 
 // 主动向官方渠道查询 PROCESSING 退款并修复终态
@@ -142,8 +156,13 @@ export async function PATCH(request: NextRequest) {
         refundNo: validation.data.refundNo,
         merchantId: ctx.user.merchantId,
       },
+      include: { order: { select: { storeId: true } } },
     });
     if (!refund) return errorResponse('退款记录不存在', 404);
+    const scope = await resolveStoreAccess(ctx.user);
+    if (!canAccessStore(scope, refund.order.storeId)) {
+      return errorResponse('无权操作该分店退款', 403);
+    }
 
     const execution = await syncChannelRefund(refund.id);
     if (!execution.ok && execution.refundStatus !== 'FAILED') {

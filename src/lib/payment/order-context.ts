@@ -73,10 +73,9 @@ export async function validateOrderContext(
     ) {
       return '收款码与门店层级不一致';
     }
-    if (qrCode.type === 'DYNAMIC') {
-      if (qrCode.orderId) return '动态收款码已使用';
+    if (qrCode.type === 'FIXED') {
       if (!qrCode.amount || !new Decimal(qrCode.amount.toString()).equals(input.amount)) {
-        return '订单金额与动态收款码不一致';
+        return '订单金额与固定收款码不一致';
       }
     }
   }
