@@ -65,3 +65,4 @@ coverage/
 # Local source backups
 *.bak
 *.bak-*
+.cursor-*.patch
