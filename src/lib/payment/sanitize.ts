@@ -7,6 +7,15 @@ const SENSITIVE_KEYS = new Set([
   'openid',
   'payer',
   'ciphertext',
+  'merchantkey',
+  'merchant_key',
+  'paymentfm_merchant_key',
+  'privatekey',
+  'apikey',
+  'apiv3key',
+  'password',
+  'passwordhash',
+  'secret',
 ]);
 
 /** 生成可持久化的支付审计副本，避免密钥、签名、账号标识和密文进入业务日志。 */

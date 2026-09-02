@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { verifyToken, JwtPayload } from './auth';
+import { sanitizePublicErrorMessage } from './security/public-error';
+import { stripSensitiveApiFields } from './security/secrets';
 
 export interface AuthContext {
   user: JwtPayload;
@@ -37,7 +39,7 @@ export async function withAuth(
 export function successResponse<T>(data: T, message?: string) {
   return NextResponse.json({
     success: true,
-    data,
+    data: stripSensitiveApiFields(data),
     message: message || '操作成功',
   });
 }
@@ -45,7 +47,7 @@ export function successResponse<T>(data: T, message?: string) {
 export function errorResponse(message: string, status: number = 400) {
   return NextResponse.json({
     success: false,
-    error: message,
+    error: sanitizePublicErrorMessage(message, status),
   }, { status });
 }
 
@@ -57,7 +59,7 @@ export function paginatedResponse<T>(
 ) {
   return NextResponse.json({
     success: true,
-    data,
+    data: stripSensitiveApiFields(data),
     pagination: {
       page,
       pageSize,
