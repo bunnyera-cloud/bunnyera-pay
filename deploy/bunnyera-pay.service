@@ -1,0 +1,74 @@
+# =============================================================================
+# BunnyEra Pay —— systemd 进程守护
+#
+# 仓库路径：
+#   /www/wwwroot/bunnyera-pay/deploy/bunnyera-pay.service
+# 系统落地（符号链接）：
+#   /etc/systemd/system/bunnyera-pay.service
+#
+# 生效命令（在服务器上、用 sudo 执行，见回复末尾完整清单）：
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable bunnyera-pay
+#   # enable 只保证开机自启，不会立刻替换正在跑的进程。
+#   # 确认配置无误后再：sudo systemctl restart bunnyera-pay
+#
+# 关键安全项：
+#   Restart=always          崩溃、被杀、异常退出都拉起
+#   RestartSec=5            两次重启间隔 5 秒
+#   StartLimitIntervalSec   与 StartLimitBurst 一起防止死循环打满 CPU
+#   EnvironmentFile         读取 .env.production，不把密钥写进单元正文
+#   HOSTNAME=127.0.0.1      即使 env 漏写，也不把 Node 暴露到 0.0.0.0
+#
+# 本单元不改 PAYMENT_ENV，也不改 Nginx / DNS。
+# =============================================================================
+
+[Unit]
+Description=BunnyEra Pay
+Documentation=https://pay.bunnyera.com
+After=network.target postgresql.service
+Wants=network.target
+
+# 防无限重启：60 秒窗口内最多成功启动 5 次，超限进入 failed，不再狂重启。
+# 人工恢复：sudo systemctl reset-failed bunnyera-pay && sudo systemctl start bunnyera-pay
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=bunnyera
+Group=bunnyera
+WorkingDirectory=/www/wwwroot/bunnyera-pay
+
+# 生产环境变量。文件权限必须是 600，属主 bunnyera:bunnyera。
+# systemd 的 EnvironmentFile 不支持 export 关键字；KEY=value 或 KEY="value" 均可。
+EnvironmentFile=/www/wwwroot/bunnyera-pay/.env.production
+
+# 写在 EnvironmentFile 之后，确保监听地址不被文件里的空值/误配覆盖成 0.0.0.0。
+Environment=HOSTNAME=127.0.0.1
+Environment=PORT=3001
+
+# 与现网一致：项目根为工作目录，启动 standalone。
+# 若 which node 不是 /bin/node，改成实际路径，例如 /usr/bin/node。
+ExecStart=/bin/node .next/standalone/server.js
+
+# 崩溃或异常退出后 5 秒自动拉起；配合上面的 StartLimit 防止死循环。
+Restart=always
+RestartSec=5
+
+# 启动/停止等待。Prisma 连库慢时避免被误判失败。
+TimeoutStartSec=60
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+# 文件日志，交给 deploy/logrotate.conf 每天切割。
+# 目录须先存在且属主是 bunnyera：mkdir -p /www/wwwroot/bunnyera-pay/logs
+StandardOutput=append:/www/wwwroot/bunnyera-pay/logs/app.log
+StandardError=append:/www/wwwroot/bunnyera-pay/logs/app.err.log
+SyslogIdentifier=bunnyera-pay
+
+NoNewPrivileges=true
+PrivateTmp=true
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
